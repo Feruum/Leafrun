@@ -17,6 +17,8 @@ Completed on 2026-10-06. Runtime: Go 1.27.0, Typst 0.15.1 (9dfd3a08), Windows Gi
 
 The native tool environment has different Git ownership from the repository owner. Native vet/build therefore disabled VCS stamping per invocation; no global Git configuration was changed. The Windows host has no C compiler on PATH, so race detection ran in Linux with GCC/musl.
 
+Before publication as Leafrun, the README title, Go module/import and Compose project name were aligned with `github.com/Feruum/Leafrun`. All Go packages and tests compiled, native vet/build passed, and Compose configuration validated after these naming changes. Runtime behavior was unchanged.
+
 Tests exercise real local Git repositories and a CGI smart-HTTP Git server. Coverage includes cache reuse, new commits, force-push, pruned branch/tag deletion, remote HEAD changes, ambiguous refs, reachable historical SHAs and rejection of stale unreachable SHAs, fetch failure without stale fallback, parallel version snapshots and JSON isolation, authentication, admission limits, unsupported Git features, paths and both blob/checkout size limits.
 
 Real Typst tests exercise Unicode JSON, nested entrypoints/includes, SVG images, project fonts, official packages, compiler diagnostics, timeouts and worktree cleanup. A Linux subprocess test checks that cancellation kills descendants.

@@ -1,4 +1,4 @@
-# Git → Typst → PDF
+# Leafrun
 
 Синхронный движок на Go: `POST /api/render` скачивает актуальный Git-проект, запускает Typst 0.15.1 и возвращает PDF. Gitea 28.0.0 хранит проекты, историю и ветки; renderer хранит только удаляемый Git-кэш.
 
@@ -39,7 +39,7 @@ git push -u origin main
 Set-Location ../..
 ```
 
-Git запросит учётные данные Gitea. Замените `YOUR_USER` в `examples/render-request.json` на владельца репозитория.
+Git запросит учётные данные Gitea. Замените `your-user` в `examples/render-request.json` на владельца репозитория.
 
 ## Скачать PDF
 

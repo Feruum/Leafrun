@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"overleaf/internal/renderer"
+	"github.com/Feruum/Leafrun/internal/renderer"
 )
 
 func main() {

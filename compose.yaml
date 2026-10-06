@@ -1,4 +1,4 @@
-name: typst-render
+name: leafrun
 
 services:
   renderer:
