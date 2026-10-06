@@ -1,0 +1,61 @@
+name: typst-render
+
+services:
+  renderer:
+    build: .
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1073741824,mode=1777
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    environment:
+      API_KEY: ${API_KEY:?Set API_KEY in .env}
+      HTTP_ADDR: ":8080"
+      CACHE_DIR: /tmp/typst-render/cache
+      WORK_DIR: /tmp/typst-render/work
+      GIT_ALLOWED_HOSTS: ${GIT_ALLOWED_HOSTS:-github.com,gitlab.com}
+      GITEA_PUBLIC_URL: ${GITEA_PUBLIC_URL:-http://localhost:3000/}
+      GITEA_INTERNAL_URL: ${GITEA_INTERNAL_URL:-http://gitea:3000/}
+      GITEA_USERNAME: ${GITEA_USERNAME:-}
+      GITEA_TOKEN: ${GITEA_TOKEN:-}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-60s}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-2}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-1048576}
+      MAX_PROJECT_BYTES: ${MAX_PROJECT_BYTES:-104857600}
+      CACHE_TTL: ${CACHE_TTL:-24h}
+    depends_on:
+      gitea:
+        condition: service_healthy
+    stop_grace_period: 100s
+
+  gitea:
+    image: docker.gitea.com/gitea:28.0.0-rootless
+    restart: unless-stopped
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__database__PATH: /var/lib/gitea/data/gitea.db
+      GITEA__server__ROOT_URL: ${GITEA_PUBLIC_URL:-http://localhost:3000/}
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__actions__ENABLED: "false"
+    volumes:
+      - gitea-data:/var/lib/gitea
+      - gitea-config:/etc/gitea
+    ports:
+      - "127.0.0.1:${GITEA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  gitea-data:
+  gitea-config:
