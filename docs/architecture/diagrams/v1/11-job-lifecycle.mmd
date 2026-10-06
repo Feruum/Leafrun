@@ -1,0 +1,27 @@
+flowchart LR
+    Queued[queued: резерв и SHA] --> Lease[Аренда и проверка прав]
+    Lease --> Preparing[preparing: исходники]
+    Preparing --> Rendering[rendering: Typst]
+    Rendering --> Publishing[publishing: PDF попытки]
+    Publishing --> Fence{Аренда актуальна? Отмены нет?}
+    Fence -->|Да| Success([succeeded])
+    Fence -->|Нет| Orphan[Удалить результат устаревшей попытки]
+    Preparing -. Временный сбой .-> Retry{Есть попытки и время?}
+    Rendering -. Временный сбой .-> Retry
+    Publishing -. Временный сбой .-> Retry
+    Retry -->|Да: задержка| Queued
+    Retry -->|Нет| Failed([failed])
+    Rendering -->|Ошибка Typst или лимит| Failed
+    Preparing -->|Неверный источник или лимит| Failed
+    Queued -->|Истёк общий срок| Expired([expired])
+    Queued -->|Отмена: вернуть резерв| Cancelled([canceled])
+    Rendering -->|Отмена| Cancelling[cancelling: остановить и убрать]
+    Preparing -->|Отмена| Cancelling
+    Publishing -->|Отмена выиграла транзакцию| Cancelling
+    Cancelling --> Cancelled
+    classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
+    classDef decision fill:#9CE6FF,stroke:#2C97BB,color:#1C4657
+    classDef terminal fill:#B3E65F,stroke:#6E9A24,color:#2F440B
+    class Queued,Lease,Preparing,Rendering,Publishing,Orphan,Cancelling component
+    class Fence,Retry decision
+    class Success,Failed,Expired,Cancelled terminal

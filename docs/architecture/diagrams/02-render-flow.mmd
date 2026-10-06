@@ -1,0 +1,37 @@
+sequenceDiagram
+    actor Client as Пользователь или бот
+    participant API as API Leafrun
+    participant Git as Git-модуль
+    participant DB as PostgreSQL
+    participant Worker as Сборщик
+    participant Typst as Typst CLI
+    participant Files as Хранилище PDF
+
+    Client->>API: Создать сборку проекта + Idempotency-Key
+    API->>DB: Проверить доступ и существующую задачу по ключу
+    API->>Git: Разрешить запрошенный ref в точный SHA
+    Git-->>API: SHA выбранного коммита
+    API->>DB: Атомарно проверить квоты, зарезервировать лимит и создать queued
+    Note over API,DB: Повторно проверить ключ в транзакции, вызов Git выполняется вне неё
+    API-->>Client: 202 + render_id + source_commit
+
+    Worker->>DB: Взять задачу с арендой и номером попытки
+    Worker->>Git: Подготовить и закрепить выбранный SHA
+    alt Выбранная версия недоступна
+        Git-->>Worker: source_revision_unavailable
+        Worker->>DB: failed + событие аудита
+    else Исходники готовы
+        Git-->>Worker: Закреплённая версия проекта
+        Worker->>Typst: Отдельная рабочая папка + JSON + лимиты
+        Typst-->>Worker: PDF или ошибка
+        alt Компиляция успешна
+            Worker->>Files: Сохранить PDF успешной попытки
+            Worker->>DB: Проверить аренду, опубликовать результат и аудит
+        else Ошибка компиляции
+            Worker->>DB: failed + ограниченная диагностика + аудит
+        end
+    end
+    Client->>API: Проверить состояние и скачать результат
+    API->>DB: Проверить доступ и срок хранения
+    API->>Files: Прочитать доступный PDF
+    API-->>Client: PDF или состояние/ошибка

@@ -1,0 +1,20 @@
+flowchart TB
+    Start([Вход и личное пространство]) --> Mode{Источник проекта}
+    Mode -->|Шаблон| Managed[Приватный Git в Gitea]
+    Mode -->|Импорт истории| Managed
+    Mode -->|Свой Git| External[Внешний проект на чтение]
+    Managed --> Edit[Редактор Typst или Markdown]
+    Edit --> Save[Сохранить с base_commit]
+    External --> Revision[Выбрать ветку, тег или SHA]
+    Save --> Build[Собрать сохранённый SHA]
+    Revision --> Build
+    Build --> Queue[Квота и очередь]
+    Queue --> Preview[PDF, SHA и история]
+    Preview --> Download([Скачать PDF])
+    Preview -. Правка .-> Edit
+    classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
+    classDef decision fill:#9CE6FF,stroke:#2C97BB,color:#1C4657
+    classDef terminal fill:#B3E65F,stroke:#6E9A24,color:#2F440B
+    class Managed,External,Edit,Save,Revision,Build,Queue,Preview component
+    class Mode decision
+    class Start,Download terminal

@@ -1,0 +1,20 @@
+flowchart LR
+    DB[PostgreSQL приложения] --> Backup[Ежедневная резервная копия]
+    Git[Git и конфигурация Gitea] --> Backup
+    Keys[Ключи расшифрования и конфигурация] --> Backup
+    Backup --> Store[Копия вне основного сервера]
+    Store --> Restore[Учебное восстановление на чистом узле]
+    Restore --> Verify{Аккаунты, права, Git-история восстановлены?}
+    Verify -->|Да| Ready([Проверка сценария вход → проект → PDF])
+    Verify -->|Нет| Fix[Исправить процедуру и повторить]
+    Fix --> Restore
+    Restart[Перезапуск контроллера] --> Leases[Найти просроченные аренды]
+    Leases --> Retry[Повторить допустимые задачи с тем же SHA]
+    Retry --> Fencing[Одна публикация и одно списание]
+    Restart --> Cleanup[Убрать orphan PDF, tmp и старые закрепления]
+    classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
+    classDef decision fill:#9CE6FF,stroke:#2C97BB,color:#1C4657
+    classDef terminal fill:#B3E65F,stroke:#6E9A24,color:#2F440B
+    class DB,Git,Keys,Backup,Store,Restore,Fix,Restart,Leases,Retry,Fencing,Cleanup component
+    class Verify decision
+    class Ready terminal

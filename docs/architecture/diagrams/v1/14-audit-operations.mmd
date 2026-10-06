@@ -1,0 +1,17 @@
+flowchart LR
+    Browser[Человек или бот] --> API[API: request_id и actor]
+    Worker[Контроллер сборок] --> State[Смена состояния в транзакции]
+    API --> State
+    State --> Audit[Append-only аудит workspace]
+    State --> Outbox[Outbox для надёжной доставки]
+    Audit --> Owner[Owner / Admin: фильтры и экспорт]
+    API --> Logs[Технические JSON-логи]
+    Worker --> Logs
+    API --> Metrics[Очередь, время, ошибки, CPU, диск]
+    Worker --> Metrics
+    Metrics --> Alerts[Оператор: пороги и алерты]
+    Metrics --> Scaling[Число сборщиков, узлы и бюджет]
+    Worker --> Diagnostic[Приватная диагностика задачи]
+    Diagnostic --> Project[История доступного проекта]
+    classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
+    class Browser,API,Worker,State,Audit,Outbox,Owner,Logs,Metrics,Alerts,Scaling,Diagnostic,Project component

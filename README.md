@@ -192,3 +192,9 @@ docker compose config --quiet
 Тесты проверяют новые коммиты, force-push, удаление веток и тегов, смену HEAD, достижимость SHA, отказ fetch, параллельные worktree и JSON, очистку и восстановление, лимиты, PDF, вложенный entrypoint, изображения, fonts/, пакеты и остановку дочерних процессов.
 
 Исходное решение: `docs/superpowers/specs/2026-10-06-typst-renderer-design.md`. План и результаты проверки находятся в `docs/superpowers/`.
+
+## Проектирование SaaS
+
+[Архитектура Leafrun SaaS v1](docs/architecture/leafrun-saas-v1.md) описывает редактор, пользователей и ботов, Git-провайдеры, очередь, изоляцию, тарифы, аудит, масштабирование и восстановление. [Навигация по 16 разделам Miro и 12 схемам Mermaid](docs/architecture/board-index.md), [этапы реализации](docs/architecture/roadmap-v1.md) и [первый план PostgreSQL](docs/superpowers/plans/2026-10-07-workspace-foundation.md) сохранены в репозитории.
+
+Сейчас реализован и проверен движок Git → Typst → PDF. Аккаунты, веб-редактор, Markdown-адаптер, команды, тарифы, очередь SaaS и автоматическое масштабирование остаются будущей разработкой.

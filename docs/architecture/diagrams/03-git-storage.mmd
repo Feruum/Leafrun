@@ -1,0 +1,10 @@
+flowchart TB
+    Simple["Обычный пользователь<br/>редактирует в Leafrun"] --> Save["Git-модуль<br/>коммит с проверкой исходного SHA"]
+    Save --> Managed[("Gitea<br/>приватные проекты Leafrun")]
+    Advanced["Продвинутый пользователь<br/>подключает свой репозиторий"] --> Connection["Подключение провайдера<br/>учётные данные конкретного владельца"]
+    Connection --> Remote[("GitHub / GitLab / Bitbucket<br/>внешний репозиторий")]
+    Managed --> Capture["Выбрать SHA и получить исходники"]
+    Remote --> Capture
+    Capture --> Pin[("Приватная Git-копия сборки<br/>закреплённый ref с ограниченным сроком")]
+    Pin --> Checkout["Сборщик<br/>отдельный checkout выбранного SHA"]
+    Checkout --> PDF["Сборка с runtime JSON<br/>новый PDF"]

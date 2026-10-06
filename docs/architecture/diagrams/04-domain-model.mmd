@@ -1,0 +1,46 @@
+erDiagram
+    USER ||--o{ MEMBERSHIP : participates
+    WORKSPACE ||--|{ MEMBERSHIP : has
+    PLAN ||--o{ WORKSPACE : defines_limits
+    WORKSPACE ||--o{ PROJECT : owns
+    WORKSPACE ||--o{ GIT_CONNECTION : owns
+    GIT_CONNECTION ||--o{ PROJECT : supplies_repository
+    WORKSPACE ||--o{ API_KEY : owns
+    PROJECT ||--o{ RENDER_JOB : generates
+    RENDER_JOB ||--o| ARTIFACT : publishes
+    WORKSPACE ||--o{ AUDIT_EVENT : records
+
+    MEMBERSHIP {
+        uuid user_id
+        uuid workspace_id
+        string role
+    }
+    PROJECT {
+        uuid workspace_id
+        uuid git_connection_id
+        string repo_identifier
+        string default_entrypoint
+    }
+    API_KEY {
+        uuid workspace_id
+        uuid owner_user_id
+        string key_hash
+        string scopes
+        datetime revoked_at
+    }
+    RENDER_JOB {
+        uuid project_id
+        string source_commit
+        string input_hash
+        string state
+        string idempotency_key
+        int attempt_number
+        datetime lease_until
+    }
+    AUDIT_EVENT {
+        uuid workspace_id
+        string actor
+        string action
+        string request_id
+        datetime occurred_at
+    }

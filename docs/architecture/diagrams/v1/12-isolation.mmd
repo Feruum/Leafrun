@@ -1,0 +1,21 @@
+flowchart TB
+    Identity[Сессия или scoped API-ключ] --> API[API: текущие права и workspace]
+    API --> DB[PostgreSQL: tenant-связи, RLS, очередь]
+    API --> Connections[Подключения workspace, encrypted credentials]
+    Connections --> Prep[Git: адреса, диск, SHA]
+    DB --> Controller[Доверенный контроллер: lease и лимиты]
+    Prep --> Source[Только исходники одной задачи]
+    subgraph Sandbox[Отдельная среда исполнения задачи]
+        Input[SHA checkout и приватный JSON] --> Typst[Typst: non-root, read-only root]
+        Packages[Закреплённые пакеты и шрифты] --> Typst
+        Typst --> Output[PDF и ограниченная диагностика]
+    end
+    Source --> Input
+    Controller -->|Запустить и остановить| Typst
+    Output --> Controller
+    Controller --> Artifacts[Приватное хранилище workspace / job]
+    Artifacts --> Download[Скачать только после проверки прав]
+    API --> Download
+    classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
+    class Identity,API,DB,Connections,Prep,Controller,Source,Input,Typst,Packages,Output,Artifacts,Download component
+    style Sandbox fill:#edf6ff,stroke:#a0c4fb,color:#1a1a1a

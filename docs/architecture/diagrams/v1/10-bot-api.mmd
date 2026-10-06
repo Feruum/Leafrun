@@ -1,0 +1,22 @@
+flowchart TB
+    Bot([Бот: JSON и Idempotency-Key]) --> Access{Ключ, scope, проект разрешены?}
+    Access -->|Нет| Deny[401, 403 или 404]
+    Access -->|Да| Key{Ключ запроса уже есть?}
+    Key -->|Другой запрос| Conflict[409 idempotency_conflict]
+    Key -->|Тот же запрос| Existing[Вернуть прежнюю задачу и SHA]
+    Key -->|Новый ключ| Ref[Разрешить ref в SHA]
+    Ref --> Job[Транзакция: ключ, резерв, JSON, queued; ответ 202]
+    Existing --> Poll[GET состояния]
+    Job --> Poll
+    Poll --> State{Состояние}
+    State -->|В процессе| Wait[Повторить опрос с задержкой]
+    Wait --> Poll
+    State -->|failed| Error[Код и приватная диагностика]
+    State -->|succeeded| PDF[GET приватного PDF]
+    PDF --> Result([Результат с SHA])
+    classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
+    classDef decision fill:#9CE6FF,stroke:#2C97BB,color:#1C4657
+    classDef terminal fill:#B3E65F,stroke:#6E9A24,color:#2F440B
+    class Deny,Conflict,Existing,Ref,Job,Poll,Wait,Error,PDF component
+    class Access,Key,State decision
+    class Bot,Result terminal
