@@ -1,8 +1,0 @@
-.git
-.env*
-.tools
-.cache
-bin
-docs
-*.pdf
-*.exe

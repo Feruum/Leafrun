@@ -1,4 +1,4 @@
-#let data = json(sys.inputs.data_file)
+#let data = json("/data.json")
 #let items = data.at("items", default: ())
 
 #table(
@@ -12,4 +12,4 @@
   )).flatten(),
 )
 
-Сформировано автоматически из Git-проекта и JSON.
+Сформировано автоматически из локального проекта и JSON.
