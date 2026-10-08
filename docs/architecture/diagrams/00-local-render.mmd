@@ -1,0 +1,13 @@
+flowchart TB
+    A(["Локальная папка проекта<br/>main.typ + изображения + данные"]):::terminator
+    B["Go: Render(repoPath)<br/>Абсолютный путь к проекту"]:::general
+    C["Typst CLI: compile --root project<br/>main.typ → document.pdf"]:::general
+    D{"Команда завершилась успешно?"}:::decision
+    E(["Абсолютный путь к document.pdf"]):::terminator
+    F["Пустой путь + error<br/>Диагностика Typst"]:::general
+    A --> B --> C --> D
+    D -->|Да| E
+    D -->|Нет| F
+    classDef general fill:#FFE86D,stroke:#A28E26,color:#574900
+    classDef decision fill:#9CE6FF,stroke:#2C97BB,color:#1C4657
+    classDef terminator fill:#B3E65F,stroke:#6E9A24,color:#2F440B
