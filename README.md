@@ -1,51 +1,36 @@
 <p align="center">
-  <img src="docs/assets/leafrun-logo.png" width="144" alt="Leafrun logo">
+  <img src="docs/assets/leafrun-logo.png" width="112" height="112" alt="Leafrun logo">
 </p>
 
-# Leafrun
+<h1 align="center">Leafrun</h1>
 
-**Local Typst projects in. PDFs out.**
+<p align="center">
+  <strong>Typst projects in. PDFs out.</strong><br>
+  A tiny Go package for rendering local document projects.
+</p>
 
-Leafrun is a small Go package that compiles a local [Typst](https://typst.app/) project into a PDF. Its public API is one function:
+<p align="center">
+  <img src="docs/assets/runtime-badges.svg" width="232" height="24" alt="Go 1.27 or later · Typst CLI 0.15.1">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> &nbsp;·&nbsp;
+  <a href="#use-from-go">Go API</a> &nbsp;·&nbsp;
+  <a href="#prepare-a-document-project">Project files</a> &nbsp;·&nbsp;
+  <a href="#development">Contributing</a>
+</p>
+
+Give Leafrun a folder containing `main.typ`. It runs the [Typst](https://typst.app/) CLI, writes `document.pdf`, and returns the absolute output path:
 
 ```go
-func Render(repoPath string) (string, error)
+pdf, err := leafrun.Render("./project")
 ```
 
-Give it a directory containing `main.typ`. It runs the Typst CLI, writes `document.pdf` in that directory, and returns the absolute output path.
-
-This repository currently contains the local rendering core and a runnable example. The larger document platform is described in the [design documents](#design-and-project-history). License selection is [pending](#license-status).
-
-[Quick start](#quick-start) · [Go API](#use-from-go) · [Project files](#prepare-a-document-project) · [Limitations](#current-scope-and-limitations) · [Development](#development)
-
-## Why Leafrun?
-
-Leafrun gives Go programs a straightforward way to generate documents from Typst templates: invoices, reports, letters, or other PDFs with local data and assets. It keeps the compilation call in one place and preserves Typst's error diagnostics.
-
-Typst does the typesetting. Your application prepares the project, calls `Render`, and decides how to store or deliver the resulting PDF.
-
-## Requirements
-
-| Dependency | Requirement |
-|---|---|
-| Go | 1.27 or later, as declared in [go.mod](go.mod) |
-| Typst CLI | Installed and available as `typst` in `PATH`; verified with 0.15.1 |
-| Project directory | Readable local files, a `main.typ` entry point, and permission to write `document.pdf` |
-
-Leafrun has no third-party Go dependencies. Git is only needed to clone this repository or to prepare a Git-backed document project; rendering itself does not require a `.git` directory.
-
-Install Go from [go.dev](https://go.dev/dl/). Install Typst using its [official installation instructions](https://typst.app/open-source/#install-the-compiler), or download a binary for your system from the [0.15.1 release](https://github.com/typst/typst/releases/tag/v0.15.1) and add its directory to `PATH`.
-
-Verify the tools before running Leafrun:
-
-```sh
-go version
-typst --version
-```
+Use it for invoices, reports, letters, and other documents with local JSON data and assets. Typst handles the typesetting; your application prepares the files and delivers the PDF.
 
 ## Quick start
 
-Clone Leafrun and render the included invoice:
+With Go and Typst installed, clone Leafrun and render the included invoice. See [requirements](#requirements) for installation details.
 
 ```sh
 git clone https://github.com/Feruum/Leafrun.git
@@ -96,6 +81,12 @@ func main() {
 
 ### Function contract
 
+The public API is one function:
+
+```go
+func Render(repoPath string) (string, error)
+```
+
 | Item | Behavior |
 |---|---|
 | Input | A local directory path, absolute or relative to the calling process's working directory |
@@ -112,6 +103,25 @@ typst compile --root <project> <project>/main.typ <project>/document.pdf
 ```
 
 Arguments are passed directly to `os/exec`, without a shell. The implementation is in [render.go](render.go).
+
+## Requirements
+
+| Dependency | Requirement |
+|---|---|
+| Go | 1.27 or later, as declared in [go.mod](go.mod) |
+| Typst CLI | Installed and available as `typst` in `PATH`; verified with 0.15.1 |
+| Project directory | Readable local files, a `main.typ` entry point, and permission to write `document.pdf` |
+
+Leafrun has no third-party Go dependencies. Git is only needed to clone this repository or to prepare a Git-backed document project; rendering itself does not require a `.git` directory.
+
+Install Go from [go.dev](https://go.dev/dl/). Install Typst using its [official installation instructions](https://typst.app/open-source/#install-the-compiler), or download a binary for your system from the [0.15.1 release](https://github.com/typst/typst/releases/tag/v0.15.1) and add its directory to `PATH`.
+
+Verify the tools before running Leafrun:
+
+```sh
+go version
+typst --version
+```
 
 ## Prepare a document project
 
@@ -234,7 +244,7 @@ docs/architecture/           Platform design and diagrams
 docs/superpowers/            Earlier implementation plans and verification records
 ```
 
-The [Leafrun logo](docs/assets/leafrun-logo.png) is a PNG on a white background created with imagegen. Its [generation prompt](docs/assets/leafrun-logo.prompt.md) is saved alongside the asset.
+The [Leafrun logo](docs/assets/leafrun-logo.png) is a transparent PNG created with imagegen. Its [generation prompts](docs/assets/leafrun-logo.prompt.md) are saved alongside the asset. The runtime badges are local SVGs, so the header needs no external image service.
 
 Questions and contributions can be discussed through [GitHub issues](https://github.com/Feruum/Leafrun/issues) and pull requests. Include a minimal document project and the Go/Typst versions when reporting a rendering problem. Keep changes consistent with the small public API; discuss larger additions before implementation.
 

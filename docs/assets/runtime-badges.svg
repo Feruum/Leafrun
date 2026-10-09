@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="232" height="24" viewBox="0 0 232 24" role="img" aria-label="Go 1.27 or later; Typst CLI 0.15.1">
+  <title>Go 1.27 or later; Typst CLI 0.15.1</title>
+  <defs>
+    <clipPath id="go"><rect width="102" height="24" rx="4"/></clipPath>
+    <clipPath id="typst"><rect width="118" height="24" rx="4"/></clipPath>
+  </defs>
+  <g clip-path="url(#go)">
+    <rect width="102" height="24" fill="#30363d"/>
+    <rect x="34" width="68" height="24" fill="#007d9c"/>
+  </g>
+  <g transform="translate(114 0)" clip-path="url(#typst)">
+    <rect width="118" height="24" fill="#30363d"/>
+    <rect x="59" width="59" height="24" fill="#227a49"/>
+  </g>
+  <g fill="#ffffff" text-anchor="middle" font-family="Verdana, Geneva, 'DejaVu Sans', sans-serif" font-size="11">
+    <text x="17" y="16">Go</text>
+    <text x="68" y="16">1.27+</text>
+    <text x="143.5" y="16" font-size="10">Typst CLI</text>
+    <text x="202.5" y="16">0.15.1</text>
+  </g>
+</svg>
