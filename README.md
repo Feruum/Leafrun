@@ -28,19 +28,25 @@ pdf, err := leafrun.Render("./project")
 
 Use it for invoices, reports, letters, and other documents with local JSON data and assets. Typst handles the typesetting; your application prepares the files and delivers the PDF.
 
+## Repository status
+
+This repository is the generation component of [Leafrun](https://github.com/leafrun/leafrun), forked from [Feruum/Leafrun](https://github.com/Feruum/Leafrun) with its history preserved. It currently contains the local rendering prototype described here. Server jobs, Temporal workflows, diagnostics services and caching remain planned; see the [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md).
+
+The existing Go module path and `Render(repoPath)` API remain unchanged. The `go get` command below therefore resolves the original module; clone this fork to work on its current files. Extraction into the shared `leafrun-document-core` is future roadmap work.
+
 ## Quick start
 
 With Go and Typst installed, clone Leafrun and render the included invoice. See [requirements](#requirements) for installation details.
 
 ```sh
-git clone https://github.com/Feruum/Leafrun.git
-cd Leafrun
+git clone https://github.com/leafrun/leafrun-generation.git
+cd leafrun-generation
 go run ./examples/render ./examples/invoice
 ```
 
 The command prints the absolute path to `examples/invoice/document.pdf`. Open that file in a PDF viewer.
 
-The example uses JSON data, an SVG image, and an included Typst file. Edit [examples/invoice/data.json](examples/invoice/data.json) and run the same command again to regenerate the invoice. The sample document's text is in Russian; you can change its text and data in the project files.
+The example uses JSON data, an SVG image, and an included Typst file. Edit [examples/invoice/data.json](examples/invoice/data.json) and run the same command again to regenerate the invoice. The example uses English text; you can change its text and data in the project files.
 
 To render another local project from this checkout:
 
@@ -246,13 +252,13 @@ docs/superpowers/            Earlier implementation plans and verification recor
 
 The [Leafrun logo](docs/assets/leafrun-logo.png) is a transparent PNG created with imagegen. Its [generation prompts](docs/assets/leafrun-logo.prompt.md) are saved alongside the asset. The runtime badges are local SVGs, so the header needs no external image service.
 
-Questions and contributions can be discussed through [GitHub issues](https://github.com/Feruum/Leafrun/issues) and pull requests. Include a minimal document project and the Go/Typst versions when reporting a rendering problem. Keep changes consistent with the small public API; discuss larger additions before implementation.
+Questions and contributions can be discussed through [GitHub issues](https://github.com/leafrun/leafrun-generation/issues) and pull requests. Include a minimal document project and the Go/Typst versions when reporting a rendering problem. Keep changes consistent with the small public API; discuss larger additions before implementation.
 
 ## Design and project history
 
 The repository was simplified to this local function on **October 9, 2026**. The previous synchronous HTTP renderer, Git cache, Gitea integration, and Docker/Compose setup remain in Git history at [commit d77d9a9](https://github.com/Feruum/Leafrun/tree/d77d9a9bf53f64371820a6b1b84e693a3dcd6486).
 
-The following documents are retained for future development and are currently written in Russian:
+The following English documents preserve earlier design decisions. They are historical and superseded by the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md):
 
 - [Architecture and product design](docs/architecture/leafrun-saas-v1.md)
 - [Diagram index and current local rendering flow](docs/architecture/board-index.md)
@@ -260,6 +266,23 @@ The following documents are retained for future development and are currently wr
 - [Miro board](https://miro.com/app/board/uXjVEd6scg8=/?moveToWidget=3458764686553812306)
 
 They describe a possible platform around the rendering core. Historical readiness checklists refer to the earlier server implementation; the current checkout contains the local function described above.
+
+## Planned generation service
+
+Generation will own jobs, admission, hard render quotas, watch debounce, diagnostics and the render cache index in `generation_db`. Its API, Render/Batch workflow workers, interactive/batch render activities and helper activities will scale independently. These services are not implemented by the local wrapper.
+
+Shared dependencies are [contracts](https://github.com/leafrun/leafrun-contracts), [platform packages](https://github.com/leafrun/leafrun-platform) and the future [document core](https://github.com/leafrun/leafrun-document-core). Runtime contracts connect Generation to [Storage](https://github.com/leafrun/leafrun-storage), [Collaboration](https://github.com/leafrun/leafrun-collaboration) and [Projects](https://github.com/leafrun/leafrun-projects).
+
+Related Linear epics (workspace access may be required):
+
+- [LEA-5](https://linear.app/bulnik/issue/LEA-5/e01-minimalnoe-yadro-rendera) — M01
+- [LEA-25](https://linear.app/bulnik/issue/LEA-25/e04-nadyozhnyj-asinhronnyj-servernyj-render) — M04
+- [LEA-33](https://linear.app/bulnik/issue/LEA-33/e05-kontrakt-proekta-parametry-i-relizy) — M05
+- [LEA-50](https://linear.app/bulnik/issue/LEA-50/e07-komplekty-massovaya-generaciya-i-dostavka) — M07
+- [LEA-82](https://linear.app/bulnik/issue/LEA-82/e11-live-collaboration-i-vladelec-proekta) — M11
+- [LEA-114](https://linear.app/bulnik/issue/LEA-114/e15-keshirovanie-ekspluataciya-i-masshtabirovanie) — M15
+
+The initial core prototype stays here while the shared library extraction remains planned. Repository setup does not complete these implementation issues.
 
 ## License status
 

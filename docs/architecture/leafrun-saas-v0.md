@@ -1,147 +1,147 @@
-# Leafrun: SaaS для генерации документов
+# Leafrun: document generation SaaS
 
-Черновик v0 для обсуждения, 6 октября 2026 года. Это проектирование следующего этапа: описанные ниже сервисы SaaS ещё не реализованы.
+> Historical design, retained from the upstream repository. Superseded by the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md) and [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md). Historical implementation claims refer to commit `d77d9a9`, not this checkout, which contains only the local rendering function.
 
-7 октября схемы перенесены на [доску Miro](https://miro.com/app/board/uXjVEd6scg8=/): пять схем в отдельных фреймах и область для вопросов и правок.
+Discussion draft v0, October 6, 2026. The SaaS services described below were proposed for the next stage and had not been implemented. On October 7, five diagrams and a discussion area were transferred to the [Miro board](https://miro.com/app/board/uXjVEd6scg8=/).
 
-Предлагаю начать с одного приложения на Go, отдельного процесса сборки, PostgreSQL и собственной Gitea. Пользователь работает с документом через веб-интерфейс, бот — через API. Исходники и история находятся в Git; очередь, доступы, тарифы и аудит — в базе приложения. Новые серверы добавляем после появления измеримой нагрузки.
+The original proposal starts with one Go application, a separate rendering process, PostgreSQL and hosted Gitea. People use the web interface; bots use the API. Git stores sources and history; the application database stores the queue, access, plans and audit. Add servers after measuring load.
 
-Схемы ниже можно редактировать прямо в этом Markdown. Отдельные исходники Mermaid и изображения SVG находятся в [diagrams/](diagrams/); исходник `.mmd` можно открыть в [Mermaid Live Editor](https://mermaid.live/).
+Diagrams are editable in this Markdown. Standalone Mermaid and SVG files live in [diagrams/](diagrams/); `.mmd` files also open in [Mermaid Live Editor](https://mermaid.live/).
 
-## Что уже есть и что нужно добавить
+## Historical implementation and proposed additions
 
-| Часть | Состояние |
+| Component | Status in the earlier server revision |
 |---|---|
-| Git → отдельная рабочая папка → Typst → PDF | Реализовано в Leafrun |
-| Синхронный `POST /api/render`, Bearer-ключ, SHA источника, лимиты и очистка | Реализовано |
-| Git-кэш, публичные внешние репозитории, приватная Gitea | Реализовано |
-| Docker Compose с движком и собственной Gitea | Реализовано и проверено |
-| Аккаунты, рабочие пространства, роли, ключи отдельных ботов | Требуется разработать |
-| Веб-редактор, шаблоны, управление проектами | Требуется разработать |
-| Очередь, хранение PDF, история сборок, тарифы, аудит | Требуется разработать |
-| Совместная работа и автоматическое масштабирование | Следующие этапы |
+| Git → isolated working directory → Typst → PDF | Implemented |
+| Synchronous `POST /api/render`, Bearer key, source SHA, limits and cleanup | Implemented |
+| Git cache, public external repositories and private Gitea | Implemented |
+| Docker Compose with the renderer and hosted Gitea | Implemented and checked |
+| Accounts, workspaces, roles and individual bot keys | Planned |
+| Web editor, templates and project management | Planned |
+| Queue, PDF storage, render history, plans and audit | Planned |
+| Collaboration and automatic scaling | Later stages |
 
-Typst использует собственную разметку `.typ`. Markdown предлагаю поддержать через адаптер: Markdown → содержимое Typst → PDF. Кандидат — пакет [cmarker](https://typst.app/universe/package/cmarker/); его совместимость с нашим Typst и нужными возможностями Markdown ещё надо проверить. Для обычного Markdown отключаем вставки произвольного Typst через `raw-typst: false`. Математика и расширения Markdown требуют отдельного решения. [Синтаксис Typst](https://typst.app/docs/reference/syntax/).
+Typst uses its own `.typ` markup. The proposed Markdown path is Markdown → Typst content → PDF. [cmarker](https://typst.app/universe/package/cmarker/) is a candidate whose compatibility and required Markdown features need verification. Ordinary Markdown should disable arbitrary Typst insertion with `raw-typst: false`; mathematics and extensions need separate decisions. See [Typst syntax](https://typst.app/docs/reference/syntax/).
 
-## 1. Общая архитектура
+## 1. Overall architecture
 
-Все блоки, кроме существующего движка и Gitea, обозначают предлагаемую разработку. Блоки внутри приложения — модули одного Go-бэкенда, а не отдельные микросервисы.
+Except for the earlier renderer and Gitea, these blocks represent planned development. Application blocks are modules of one Go backend, not independent services.
 
 ```mermaid
 flowchart TB
-    User["Пользователь"] --> Web["Веб-интерфейс<br/>проекты, редактор, история"]
-    Bot["Бот или интеграция"] --> API
+    User["User"] --> Web["Web editor<br/>projects + history"]
+    Bot["Bot / integration"] --> API
     Web --> API
 
-    subgraph App["Приложение Leafrun · один Go-бэкенд"]
-        API["Публичный API<br/>сессии и ключи ботов"]
-        Core["Модули приложения<br/>доступы, проекты, квоты, сборки и аудит"]
+    subgraph App["Leafrun Go backend"]
+        API["Public API<br/>sessions + bot keys"]
+        Core["Modules<br/>access · projects · jobs · audit"]
         API --> Core
     end
 
-    Core --> DB[("PostgreSQL<br/>аккаунты, проекты, очередь, аудит")]
-    Core --> Git["Git-модуль<br/>доступ к исходникам и фиксация версии"]
-    Git --> Gitea[("Собственная Gitea<br/>исходники и история")]
-    Git --> External["GitHub · GitLab · Bitbucket<br/>репозитории пользователя"]
-    Worker["Процессы сборки<br/>используют готовый движок Leafrun"] -->|"задание и статус"| DB
-    Worker -->|"точная версия проекта"| Git
-    Worker -->|"запись PDF"| Files[("Приватное хранилище результатов<br/>PDF с ограниченным сроком жизни")]
-    API -->|"скачивание после проверки доступа"| Files
+    Core --> DB[("PostgreSQL<br/>data + queue")]
+    Core --> Git["Git module<br/>revision capture"]
+    Git --> Gitea[("Gitea<br/>sources + history")]
+    Git --> External["External Git<br/>user repositories"]
+    Worker["Render workers"] -->|"job and status"| DB
+    Worker -->|"exact project revision"| Git
+    Worker -->|"write PDF"| Files[("Private PDF storage<br/>limited lifetime")]
+    API -->|"authorized download"| Files
 ```
 
-Git-модуль сначала остаётся частью бэкенда и процесса подготовки сборок. Он скрывает различия провайдеров и проверяет доступ к каждому подключению. Сборщик получает только исходники своей задачи, без общего набора токенов пользователей.
+The Git module initially belongs to the backend and source-preparation process. It hides provider differences and checks each connection's permissions. A renderer receives only its job's sources, not a shared collection of user tokens.
 
-PostgreSQL хранит задания вместе с состоянием приложения. Для получения задания несколькими сборщиками можно использовать `FOR UPDATE SKIP LOCKED`; это [поддержанный сценарий очереди](https://www.postgresql.org/docs/current/sql-select.html). Redis на первом этапе не обязателен.
+PostgreSQL stores jobs with application state. Multiple workers can claim jobs using [`FOR UPDATE SKIP LOCKED`](https://www.postgresql.org/docs/current/sql-select.html). Redis was optional in this initial design.
 
-## 2. Путь от запроса до PDF
+## 2. Request to PDF
 
-Долгую сборку в SaaS выносим из HTTP-запроса. Предлагаемый публичный API:
+Long rendering work moves out of the HTTP request. The proposed public API is:
 
-| Запрос | Результат |
+| Request | Result |
 |---|---|
-| `POST /v1/projects/{project_id}/renders` | `202`, идентификатор сборки, состояние, выбранный SHA |
-| `GET /v1/renders/{render_id}` | Состояние, SHA, ограниченная диагностика |
-| `GET /v1/renders/{render_id}/pdf` | PDF после проверки доступа, пока не истёк срок хранения |
-| `POST /v1/renders/{render_id}/cancel` | Отмена задания или выполняющейся сборки |
+| `POST /v1/projects/{project_id}/renders` | `202`, render ID, state and selected SHA |
+| `GET /v1/renders/{render_id}` | State, SHA and bounded diagnostics |
+| `GET /v1/renders/{render_id}/pdf` | Authorized PDF download before expiry |
+| `POST /v1/renders/{render_id}/cancel` | Cancel queued or active work |
 
-В запросе передаются `ref`, `entrypoint` и `data`; адрес репозитория берём из проекта. `Idempotency-Key` повторно возвращает уже созданную задачу в том же рабочем пространстве. Повтор ключа с другим содержимым даёт `409`. Данные JSON не коммитим в Git.
+The request contains `ref`, `entrypoint` and `data`; the project supplies the repository address. An `Idempotency-Key` returns the previously created job in the same workspace. Reusing it with different content returns `409`. Runtime JSON is not committed to Git.
 
-Для очереди и повторных попыток JSON временно сохраняем как приватные входные данные задачи с ограничением размера. Доступ к нему получает только процесс обработки этой задачи; после завершения и окончания окна повторов данные удаляем. В манифесте и аудите остаётся хеш.
+Persist bounded JSON as private job input for queuing and retries. Only that job's execution process receives it. Delete it after termination and the retry window; retain its hash in the manifest and audit.
 
 ```mermaid
 sequenceDiagram
-    actor Client as Пользователь или бот
-    participant API as API Leafrun
-    participant Git as Git-модуль
+    actor Client as User or bot
+    participant API as Leafrun API
+    participant Git as Git module
     participant DB as PostgreSQL
-    participant Worker as Сборщик
+    participant Worker as Render worker
     participant Typst as Typst CLI
-    participant Files as Хранилище PDF
+    participant Files as PDF storage
 
-    Client->>API: Создать сборку проекта + Idempotency-Key
-    API->>DB: Проверить доступ и существующую задачу по ключу
-    API->>Git: Разрешить запрошенный ref в точный SHA
-    Git-->>API: SHA выбранного коммита
-    API->>DB: Атомарно проверить квоты, зарезервировать лимит и создать queued
-    Note over API,DB: Повторно проверить ключ в транзакции, вызов Git выполняется вне неё
+    Client->>API: Create project render + Idempotency-Key
+    API->>DB: Check access and existing job by key
+    API->>Git: Resolve requested ref to an exact SHA
+    Git-->>API: Selected commit SHA
+    API->>DB: Atomically check quotas, reserve capacity and create queued job
+    Note over API,DB: Recheck key inside the transaction; call Git outside it
     API-->>Client: 202 + render_id + source_commit
 
-    Worker->>DB: Взять задачу с арендой и номером попытки
-    Worker->>Git: Подготовить и закрепить выбранный SHA
-    alt Выбранная версия недоступна
+    Worker->>DB: Claim job with lease and attempt number
+    Worker->>Git: Prepare and pin selected SHA
+    alt Selected revision unavailable
         Git-->>Worker: source_revision_unavailable
-        Worker->>DB: failed + событие аудита
-    else Исходники готовы
-        Git-->>Worker: Закреплённая версия проекта
-        Worker->>Typst: Отдельная рабочая папка + JSON + лимиты
-        Typst-->>Worker: PDF или ошибка
-        alt Компиляция успешна
-            Worker->>Files: Сохранить PDF успешной попытки
-            Worker->>DB: Проверить аренду, опубликовать результат и аудит
-        else Ошибка компиляции
-            Worker->>DB: failed + ограниченная диагностика + аудит
+        Worker->>DB: failed + audit event
+    else Sources ready
+        Git-->>Worker: Pinned project revision
+        Worker->>Typst: Isolated working directory + JSON + limits
+        Typst-->>Worker: PDF or error
+        alt Compilation succeeded
+            Worker->>Files: Store successful attempt PDF
+            Worker->>DB: Check lease, publish result and audit
+        else Compilation failed
+            Worker->>DB: failed + bounded diagnostics + audit
         end
     end
-    Client->>API: Проверить состояние и скачать результат
-    API->>DB: Проверить доступ и срок хранения
-    API->>Files: Прочитать доступный PDF
-    API-->>Client: PDF или состояние/ошибка
+    Client->>API: Check status and download result
+    API->>DB: Check access and retention
+    API->>Files: Read available PDF
+    API-->>Client: PDF or status/error
 ```
 
-Состояния: `queued → preparing → rendering → publishing → succeeded`; также `failed`, `canceled`, `expired`. При ошибке Typst ветка публикации не выполняется: сохраняем ограниченную диагностику и завершаем задачу.
+States are `queued → preparing → rendering → publishing → succeeded`, with `failed`, `canceled` and `expired` alternatives. A Typst error skips publication, stores bounded diagnostics and terminates the job.
 
-Аренду задачи продлеваем heartbeat-сообщениями. После падения процесса задачу можно повторить; исполнение допускает несколько попыток. Номер попытки защищает публикацию от сборщика с просроченной арендой. Временные файлы, непривязанные PDF и закреплённые версии удаляет периодическая уборка. Повторяем только временные инфраструктурные ошибки, с ограничением числа попыток; ошибки разметки автоматически не повторяем.
+Heartbeats renew the job lease. A crashed job may execute again; attempt numbers prevent an expired worker from publishing. Periodic cleanup removes temporary files, unreferenced PDFs and pinned revisions. Retry transient infrastructure errors only, with a bounded count; markup errors are not automatically retried.
 
-В манифесте сборки сохраняем SHA, entrypoint, хеш JSON, формат входа, версии Typst и адаптера. Это позволяет объяснить результат. Для воспроизводимости потребуется также фиксировать пакеты, шрифты и окружение. Таймаут исполнения остаётся отдельным от времени ожидания в очереди.
+Record source SHA, entry point, JSON hash, input format, Typst and adapter versions in the render manifest. Reproducibility additionally requires pinned packages, fonts and environment. Execution timeout is separate from queue wait.
 
-## 3. Хранение проектов в Git
+## 3. Git project storage
 
 ```mermaid
 flowchart TB
-    Simple["Обычный пользователь<br/>редактирует в Leafrun"] --> Save["Git-модуль<br/>коммит с проверкой исходного SHA"]
-    Save --> Managed[("Gitea<br/>приватные проекты Leafrun")]
-    Advanced["Продвинутый пользователь<br/>подключает свой репозиторий"] --> Connection["Подключение провайдера<br/>учётные данные конкретного владельца"]
-    Connection --> Remote[("GitHub / GitLab / Bitbucket<br/>внешний репозиторий")]
-    Managed --> Capture["Выбрать SHA и получить исходники"]
+    Simple["User<br/>edits in Leafrun"] --> Save["Git module<br/>commit with base SHA check"]
+    Save --> Managed[("Gitea<br/>private Leafrun projects")]
+    Advanced["Advanced user<br/>connects a repository"] --> Connection["Provider connection<br/>scoped credentials"]
+    Connection --> Remote[("External Git<br/>repository")]
+    Managed --> Capture["Select SHA and fetch sources"]
     Remote --> Capture
-    Capture --> Pin[("Приватная Git-копия сборки<br/>закреплённый ref с ограниченным сроком")]
-    Pin --> Checkout["Сборщик<br/>отдельный checkout выбранного SHA"]
-    Checkout --> PDF["Сборка с runtime JSON<br/>новый PDF"]
+    Capture --> Pin[("Private Git copy<br/>pinned ref + TTL")]
+    Pin --> Checkout["Worker<br/>checkout exact SHA"]
+    Checkout --> PDF["Render with runtime JSON<br/>new PDF"]
 ```
 
-Для обычного пользователя создание проекта создаёт приватный репозиторий в Gitea. Сохранение в редакторе создаёт коммит. Если документ успел изменить другой пользователь, проверка исходного SHA возвращает конфликт: нельзя молча перезаписать его работу. Gitea даёт хранение и историю, а аккаунты и разрешения SaaS проверяет Leafrun.
+For ordinary users, creating a project creates a private Gitea repository; saving creates a commit. A base-SHA check returns a conflict if another user has changed the document, preventing silent overwrite. Gitea stores history; Leafrun checks SaaS accounts and authorization.
 
-Внешние подключения на первом этапе позволяют читать и собирать репозиторий. Запись обратно через OAuth/PAT, вебхуки и автоматические сборки добавляем отдельно. Токены шифруем, ограничиваем провайдером и рабочим пространством; в URL и логи их не помещаем. Для собственного Git-сервера нужны проверенные адреса и правила исходящего доступа.
+External connections initially support reading and rendering. OAuth/PAT writes, webhooks and automatic builds are separate additions. Encrypt tokens and scope them to provider and workspace; do not put them in URLs or logs. Self-hosted Git requires approved addresses and outbound-network rules.
 
-SHA фиксируем до постановки задания в очередь. Но одного SHA недостаточно: force-push может удалить его из доступной истории. Поэтому подготовка сохраняет нужные объекты и служебный ref в приватной Git-копии с ограниченным сроком хранения. Для MVP такую копию можно держать в служебных репозиториях собственной Gitea. Если коммит исчез до получения копии, возвращаем явную ошибку; последующие попытки используют уже закреплённую версию.
+Capture SHA before queue admission. SHA alone is insufficient because a force-push can make objects unreachable. Preparation stores the required objects and a service ref in a private Git copy with limited retention. Service repositories in hosted Gitea can provide this for the original MVP. If the commit disappears before capture, return an explicit error; retries use the captured version.
 
-Служебные копии закрыты от пользователей, изолированы по рабочему пространству/подключению и ограничены по объёму и времени. Это новый механизм SaaS. Существующий удаляемый кэш движка остаётся ускорением, а не единственным местом закрепления версии. Рабочие папки сборщиков локальные и не разделяются между серверами.
+Service copies are private, isolated by workspace/connection and bounded by size and lifetime. The disposable engine cache is an optimization, not the only durable revision pin. Worker directories are local and are not shared across servers.
 
-PDF, runtime JSON и журнал сборок храним отдельно от исходников. В начале PDF могут лежать на приватном постоянном томе одного сервера. При нескольких серверах потребуется общее хранилище результатов, например объектное. Это не меняет хранение проектов в Git. Для Git-истории, скачивания и временных копий нужны отдельные дисковые лимиты: ограничение файлов проекта не ограничивает всю историю репозитория.
+Store PDFs, runtime JSON and render history separately from sources. One server may initially use a private persistent PDF volume; multiple servers need shared output storage. Git history, downloads and temporary objects require separate disk limits because checkout size does not bound the full repository history.
 
-## 4. Пользователи, организации и аудит
+## 4. Users, organizations and audit
 
-Рабочее пространство — единица владения, оплаты и ограничения ресурсов. В бесплатном тарифе оно принадлежит одному человеку; в командном имеет несколько участников. Компания может владеть рабочим пространством без отдельной копии приложения.
+A workspace is the unit of ownership, billing and resource limits. A free workspace belongs to one person; a team workspace has multiple members. A company can own a workspace without a separate application instance.
 
 ```mermaid
 erDiagram
@@ -192,83 +192,83 @@ erDiagram
     }
 ```
 
-Это концептуальная модель, а не готовая схема миграций. Ключ может быть ограничен отдельными проектами; конкретные связи добавим при проектировании API.
+This is a conceptual model, not a migration schema. A key may be restricted to projects; the API design adds those relationships.
 
-| Роль | Доступ |
+| Role | Access |
 |---|---|
-| Owner | Оплата, участники, все проекты и ключи пространства |
-| Admin | Управление участниками и проектами в пределах разрешений владельца |
-| Editor | Изменение исходников, запуск сборок, чтение результатов |
-| Viewer | Чтение разрешённых исходников и PDF |
+| Owner | Billing, members, all workspace projects and keys |
+| Admin | Members and projects within owner-defined permissions |
+| Editor | Source changes, rendering and result reads |
+| Viewer | Authorized sources and PDFs |
 
-Ключ бота имеет область доступа и владельца, хранится в виде хеша, показывается один раз и может быть отозван. Его полномочия не превышают права владельца и рабочего пространства. Проверку пространства выполняем для проекта, задачи, Git-подключения и скачивания PDF.
+A bot key has an owner and scope, is stored as a hash, is shown once and can be revoked. Its rights never exceed the owner's or workspace's rights. Check workspace ownership for projects, jobs, Git connections and downloads.
 
-Аудит фиксирует вход, изменения проекта и доступа, выпуск/отзыв ключа, запуск/отмену/завершение сборки, смену тарифа и результат проверки квоты. Поля события: UTC-время, рабочее пространство, актор, действие, request_id, project_id/render_id, SHA и результат. События не редактируются пользователем; хранение и доступ к ним подчиняются политике тарифа. JSON документа, текст документа, PDF и секреты в аудит не записываем.
+Audit records login, project/access changes, key creation/revocation, render admission/cancellation/completion, plan changes and quota outcomes. Event fields include UTC time, workspace, actor, action, request ID, project/render ID, SHA and outcome. Users cannot edit audit events; retention and access follow plan policy. Exclude document JSON, source text, PDFs and secrets.
 
-Технические логи нужны для диагностики процессов; метрики — для нагрузки и масштабирования. Они отдельны от пользовательского аудита. Сборщик исполняет пользовательский документ с лимитами CPU, памяти, времени, диска и изоляцией файловой системы. Переход к публичному SaaS требует усилить контейнерную изоляцию, ограничить сеть и проверить сценарии доступа между пользователями; один `--root` Typst не покрывает всю эту задачу.
+Technical logs diagnose processes; metrics measure load and scaling. Both are separate from user audit. Execution needs CPU, memory, time, disk and filesystem limits. A public SaaS also needs stronger container isolation, network restrictions and cross-tenant tests; Typst `--root` alone is insufficient.
 
-## 5. Тарифы и квоты: исходное предложение
+## 5. Plans and quotas: initial proposal
 
-Числа ниже — гипотеза для обсуждения, а не утверждённая коммерческая политика. Для бесплатного тарифа предлагаю одновременно ограничить проекты, собственное хранилище и вычисления.
+These numbers are discussion hypotheses, not commercial commitments. The free tier jointly limits projects, hosted storage and computation.
 
-| Ограничение | Free, черновик | Pro | Team / Company |
+| Limit | Free draft | Pro | Team / Company |
 |---|---|---|---|
-| Участники | 1 | 1 | Несколько, роли и приглашения |
-| Проекты | 10 | Больше | Общие проекты пространства |
-| Хранение исходников в нашей Gitea | 10 MiB, включая историю и файлы | Больше | Общая квота компании |
-| Сборки | 100 принятых задач в месяц | Больше | Общая квота и приоритет |
-| Одновременные сборки пространства | 1 | Больше | Настраиваемый предел |
-| Совместная работа | Личный проект | Личный проект | Доступ команды, история и конфликты сохранения |
-| Хранение результатов и аудита | PDF 24 часа, аудит 30 дней | Дольше | По политике тарифа |
+| Members | 1 | 1 | Multiple, roles and invitations |
+| Projects | 10 | More | Shared workspace projects |
+| Hosted Gitea storage, history included | 10 MiB | More | Shared company quota |
+| Accepted jobs per month | 100 | More | Shared quota and priority |
+| Concurrent workspace renders | 1 | More | Configurable |
+| Collaboration | Personal project | Personal project | Shared access, history and save conflicts |
+| PDF / audit retention | 24 hours / 30 days | Longer | Plan policy |
 
-У внешнего репозитория не считаем чужое хранилище как нашу пользовательскую квоту. Но применяем лимиты к скачиванию, временным копиям, размеру проекта и числу сборок. Например, лимит файлов одной сборки 100 MiB и таймаут исполнения 60 секунд наследуем от движка; бесплатное размещение в Gitea всё равно ограничено 10 MiB.
+External repository storage is not counted as hosted user storage, but downloads, temporary copies, source size and renders remain limited. The historical engine supplied a 100 MiB per-render source limit and 60-second execution timeout; free hosted Git was still proposed at 10 MiB.
 
-Квоты резервируем атомарно до расходования ресурса. Повтор по ключу идемпотентности не создаёт новую платную задачу. Внутренние повторные попытки не списывают ещё одну сборку; инфраструктурный отказ возвращает резерв. Размер Git-хранилища проверяем перед записью и периодически пересчитываем. Сетевые ограничения, общий дисковый бюджет и справедливое распределение очереди защищают платформу от одного слишком активного клиента.
+Reserve quotas atomically before spending resources. Idempotent retries do not create another billable job; internal retries do not consume another render; terminal infrastructure failure refunds the reservation. Check Git storage before writes and periodically reconcile usage. Network limits, global disk budgets and fair queue scheduling prevent one client exhausting the platform.
 
-Тариф хранится в базе как набор разрешений и лимитов. На первом этапе администратор может назначать его вручную; автоматические платежи и провайдера оплаты выбираем отдельно. Совместный доступ с коммитами включаем раньше, чем одновременное редактирование: последнее потребует отдельного протокола согласования изменений и работы при отключении сети.
+Store plans as server-side entitlements and limits. Administrators can initially assign them manually; choose automated payment separately. Commit-based collaboration precedes simultaneous editing, which needs its own synchronization and offline protocol.
 
-## 6. Развёртывание и рост нагрузки
+## 6. Deployment and growth
 
 ```mermaid
 flowchart TB
-    subgraph Start["Первый этап · один сервер, Docker Compose"]
-        API1["Веб + API"] --> DB1[("PostgreSQL<br/>очередь и данные")]
-        W1["Один процесс сборки<br/>до 2 задач одновременно"] --> DB1
-        W1 --> G1[("Gitea<br/>постоянный том")]
-        W1 --> F1[("PDF<br/>постоянный том + TTL")]
+    subgraph Start["Initial stage · one server, Docker Compose"]
+        API1["Web + API"] --> DB1[("PostgreSQL<br/>queue and data")]
+        W1["One render worker<br/>up to 2 concurrent jobs"] --> DB1
+        W1 --> G1[("Gitea<br/>persistent volume")]
+        W1 --> F1[("PDF<br/>persistent volume + TTL")]
         API1 --> G1
         API1 --> F1
     end
 
-    subgraph Growth["После измерения нагрузки · несколько серверов"]
-        LB["Входящий трафик"] --> APIs["Несколько экземпляров API"]
-        APIs --> DB2[("Общая PostgreSQL<br/>очередь и данные")]
-        Workers["Несколько изолированных сборщиков"] --> DB2
-        Workers --> G2[("Git-хранилище<br/>отдельная стратегия ёмкости")]
-        Workers --> F2[("Общее приватное хранилище PDF")]
+    subgraph Growth["After measuring load · multiple servers"]
+        LB["Incoming traffic"] --> APIs["Multiple API instances"]
+        APIs --> DB2[("Shared PostgreSQL<br/>queue and data")]
+        Workers["Multiple isolated render workers"] --> DB2
+        Workers --> G2[("Git storage<br/>own capacity plan")]
+        Workers --> F2[("Shared private PDF storage")]
         APIs --> G2
         APIs --> F2
-        DB2 --> Metrics["Метрики<br/>ожидание задач, загрузка и свободные ресурсы"]
-        Metrics --> HPA["Масштабирование числа сборщиков<br/>минимум, максимум и бюджет"]
+        DB2 --> Metrics["Metrics<br/>queue + resources"]
+        Metrics --> HPA["Worker scaling<br/>bounds + budget"]
         HPA --> Workers
-        Workers -->|"не хватает места для процессов"| Nodes["Масштабирование серверов<br/>механизм выбранного хостинга"]
+        Workers -->|"insufficient process capacity"| Nodes["Node scaling"]
     end
 
-    W1 -.->|"рост нагрузки"| Workers
+    W1 -.->|"increasing load"| Workers
 ```
 
-Compose достаточен для первого этапа. Когда один сервер становится узким местом, сначала добавляем сборщики и общее хранилище результатов. При выборе Kubernetes число сборщиков может менять [Horizontal Pod Autoscaler](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/) по нагрузке и метрикам очереди. Добавление самих серверов — отдельный механизм [node autoscaling](https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/).
+Compose is sufficient for the initial historical design. When one server becomes a bottleneck, add workers and shared output storage. Kubernetes [HPA](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/) can scale worker count from load and queue metrics; [node autoscaling](https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/) adds servers separately.
 
-Главные сигналы: время ожидания самого старого задания, длина очереди, занятость CPU/памяти, длительность и ошибки сборок. У масштабирования есть верхний предел и бюджет; иначе бесплатные запросы могут породить неограниченный счёт. Пока масштаба нет, ограничиваем очередь и показываем ожидание пользователю.
+Track oldest-job wait, queue length, CPU/memory occupancy, render duration and errors. Set a maximum and budget so free requests cannot create an unlimited bill. Before scaling, bound the queue and show users the wait.
 
-Gitea и PostgreSQL масштабируются отдельно от сборщиков. Нельзя просто поднять несколько экземпляров Gitea с одной SQLite и общим каталогом. На старте остаётся один экземпляр Gitea; дальнейшую БД, диски и отказоустойчивость выбираем по фактической нагрузке. Резервируем данные приложения, Git-репозитории и конфигурацию доступа; проверяем восстановление. Кэш и временные PDF не заменяют резервную копию исходников.
+Gitea and PostgreSQL scale independently. Do not multiply Gitea processes over one SQLite database and shared directory. Start with one Gitea instance and choose later storage and availability measures from actual load. Back up application data, Git repositories and access configuration and test restoration. Caches and temporary PDFs are not source backups.
 
-## Порядок реализации
+## Implementation sequence
 
-1. Согласовать этот черновик: форматы ввода, роли, бесплатные квоты, границы совместной работы и внешних подключений.
-2. Сделать вертикальный сценарий: зарегистрироваться → создать проект в Gitea → сохранить документ → поставить сборку → получить PDF → увидеть историю и аудит.
-3. Добавить ключи ботов, внешние Git-подключения, квоты и платные разрешения. До открытия другим пользователям проверить изоляцию данных и исполнения.
-4. Добавить командные пространства и разрешение конфликтов сохранения; затем решать, нужен ли редактор с одновременным вводом.
-5. Измерить нагрузку и стоимость сборки, после этого включать масштабирование и автоматическую оплату.
+1. Agree input formats, roles, free quotas, collaboration scope and external connection boundaries.
+2. Build one complete path: register → create Gitea project → save → queue render → download PDF → view history and audit.
+3. Add bot keys, external Git, quotas and paid entitlements. Verify data and execution isolation before opening access.
+4. Add teams and save-conflict handling, then specify simultaneous editing.
+5. Measure load and render cost before enabling autoscaling and automated billing.
 
-Для первого обсуждения достаточно ответить на три вопроса: обычный пользователь пишет Markdown или Typst; совместная работа означает общий проект или одновременное редактирование; бесплатный тариф ограничиваем числом проектов, объёмом Git и числом сборок одновременно или иначе. До этих решений текущий движок можно использовать как готовую основу, а схемы — исправлять по обратной связи.
+Initial discussion questions were Markdown versus Typst, shared projects versus simultaneous editing, and the combination of free project/storage/render quotas. The renderer provided a starting point while the design remained open to feedback.

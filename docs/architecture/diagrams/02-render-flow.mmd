@@ -1,37 +1,37 @@
 sequenceDiagram
-    actor Client as Пользователь или бот
-    participant API as API Leafrun
-    participant Git as Git-модуль
+    actor Client as User or bot
+    participant API as Leafrun API
+    participant Git as Git module
     participant DB as PostgreSQL
-    participant Worker as Сборщик
+    participant Worker as Render worker
     participant Typst as Typst CLI
-    participant Files as Хранилище PDF
+    participant Files as PDF storage
 
-    Client->>API: Создать сборку проекта + Idempotency-Key
-    API->>DB: Проверить доступ и существующую задачу по ключу
-    API->>Git: Разрешить запрошенный ref в точный SHA
-    Git-->>API: SHA выбранного коммита
-    API->>DB: Атомарно проверить квоты, зарезервировать лимит и создать queued
-    Note over API,DB: Повторно проверить ключ в транзакции, вызов Git выполняется вне неё
+    Client->>API: Create project render + Idempotency-Key
+    API->>DB: Check access and existing job by key
+    API->>Git: Resolve requested ref to an exact SHA
+    Git-->>API: Selected commit SHA
+    API->>DB: Atomically check quotas, reserve capacity and create queued job
+    Note over API,DB: Recheck key inside the transaction; call Git outside it
     API-->>Client: 202 + render_id + source_commit
 
-    Worker->>DB: Взять задачу с арендой и номером попытки
-    Worker->>Git: Подготовить и закрепить выбранный SHA
-    alt Выбранная версия недоступна
+    Worker->>DB: Claim job with lease and attempt number
+    Worker->>Git: Prepare and pin selected SHA
+    alt Selected revision unavailable
         Git-->>Worker: source_revision_unavailable
-        Worker->>DB: failed + событие аудита
-    else Исходники готовы
-        Git-->>Worker: Закреплённая версия проекта
-        Worker->>Typst: Отдельная рабочая папка + JSON + лимиты
-        Typst-->>Worker: PDF или ошибка
-        alt Компиляция успешна
-            Worker->>Files: Сохранить PDF успешной попытки
-            Worker->>DB: Проверить аренду, опубликовать результат и аудит
-        else Ошибка компиляции
-            Worker->>DB: failed + ограниченная диагностика + аудит
+        Worker->>DB: failed + audit event
+    else Sources ready
+        Git-->>Worker: Pinned project revision
+        Worker->>Typst: Isolated working directory + JSON + limits
+        Typst-->>Worker: PDF or error
+        alt Compilation succeeded
+            Worker->>Files: Store successful attempt PDF
+            Worker->>DB: Check lease, publish result and audit
+        else Compilation failed
+            Worker->>DB: failed + bounded diagnostics + audit
         end
     end
-    Client->>API: Проверить состояние и скачать результат
-    API->>DB: Проверить доступ и срок хранения
-    API->>Files: Прочитать доступный PDF
-    API-->>Client: PDF или состояние/ошибка
+    Client->>API: Check status and download result
+    API->>DB: Check access and retention
+    API->>Files: Read available PDF
+    API-->>Client: PDF or status/error

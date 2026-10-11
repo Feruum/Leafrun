@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512.107 907.909" width="512.107" height="907.909" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Liberation%20Sans:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Liberation Sans', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<polyline class="edge" data-from="A" data-to="B" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="241.04825,153.8 241.04825,223.8" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="B" data-to="C" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="241.04825,277.6 241.04825,347.6" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="C" data-to="D" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="241.04825,401.40000000000003 241.04825,471.40000000000003" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D" data-to="E" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Yes" points="217.83008333333333,587.4908333333334 217.83008333333333,668.7090000000001 148.0215,668.7090000000001 148.0215,771.009" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D" data-to="F" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="No" points="264.26641666666666,587.4908333333334 264.26641666666666,622.7090000000001 334.07500000000005,622.7090000000001 334.07500000000005,725.009" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<g class="edge-label" data-from="D" data-to="E" data-label="Yes">
+  <rect x="129.5215" y="675.7090000000001" width="36.658" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="147.8505" y="690.859" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Yes</text>
+</g>
+<g class="edge-label" data-from="D" data-to="F" data-label="No">
+  <rect x="318.57500000000005" y="629.7090000000001" width="30.718000000000004" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="333.934" y="644.859" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">No</text>
+</g>
+<g class="node" data-id="A" data-label="Project folder
+sources + data" data-shape="stadium">
+  <rect x="176.35425" y="100" width="129.388" height="53.800000000000004" rx="26.900000000000002" ry="26.900000000000002" fill="#B3E65F" stroke="#6E9A24" stroke-width="0.75" />
+  <text x="241.04825" y="126.9" text-anchor="middle" font-size="13" font-weight="500" fill="#2F440B"><tspan x="241.04825" dy="-3.9000000000000012">Project folder</tspan><tspan x="241.04825" dy="16.900000000000002">sources + data</tspan></text>
+</g>
+<g class="node" data-id="B" data-label="Render(path)
+absolute path" data-shape="rectangle">
+  <rect x="181.17075" y="223.8" width="119.75500000000001" height="53.800000000000004" rx="0" ry="0" fill="#FFE86D" stroke="#A28E26" stroke-width="0.75" />
+  <text x="241.04825" y="250.70000000000002" text-anchor="middle" font-size="13" font-weight="500" fill="#574900"><tspan x="241.04825" dy="-3.9000000000000012">Render(path)</tspan><tspan x="241.04825" dy="16.900000000000002">absolute path</tspan></text>
+</g>
+<g class="node" data-id="C" data-label="Typst CLI
+main.typ → PDF" data-shape="rectangle">
+  <rect x="177.09525" y="347.6" width="127.90599999999999" height="53.800000000000004" rx="0" ry="0" fill="#FFE86D" stroke="#A28E26" stroke-width="0.75" />
+  <text x="241.04825" y="374.5" text-anchor="middle" font-size="13" font-weight="500" fill="#574900"><tspan x="241.04825" dy="-3.9000000000000012">Typst CLI</tspan><tspan x="241.04825" dy="16.900000000000002">main.typ → PDF</tspan></text>
+</g>
+<g class="node" data-id="D" data-label="Compile OK?" data-shape="diamond">
+  <polygon points="241.04825,471.4000000000001 310.70275000000004,541.0545000000001 241.04825,610.7090000000001 171.39374999999998,541.0545000000001" fill="#9CE6FF" stroke="#2C97BB" stroke-width="0.75" />
+  <text x="241.04825" y="541.0545000000001" text-anchor="middle" font-size="13" font-weight="500" fill="#1C4657" dy="4.55">Compile OK?</text>
+</g>
+<g class="node" data-id="E" data-label="PDF path" data-shape="stadium">
+  <rect x="100" y="771.009" width="96.04299999999999" height="36.900000000000006" rx="18.450000000000003" ry="18.450000000000003" fill="#B3E65F" stroke="#6E9A24" stroke-width="0.75" />
+  <text x="148.0215" y="789.4590000000001" text-anchor="middle" font-size="13" font-weight="500" fill="#2F440B" dy="4.55">PDF path</text>
+</g>
+<g class="node" data-id="F" data-label="Error + diagnostics" data-shape="rectangle">
+  <rect x="256.043" y="725.009" width="156.06400000000002" height="36.900000000000006" rx="0" ry="0" fill="#FFE86D" stroke="#A28E26" stroke-width="0.75" />
+  <text x="334.07500000000005" y="743.4590000000001" text-anchor="middle" font-size="13" font-weight="500" fill="#574900" dy="4.55">Error + diagnostics</text>
+</g>
+</svg>

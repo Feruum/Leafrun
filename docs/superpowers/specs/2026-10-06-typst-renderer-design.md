@@ -1,5 +1,7 @@
 # Typst rendering engine design
 
+> Historical document retained from upstream. It describes an earlier server revision, not the current local wrapper. See the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md).
+
 Approved on 2026-10-06. Build a Go standard-library service and self-hosted Gitea, with one synchronous `POST /api/render` endpoint.
 
 ## Contract

@@ -1,5 +1,7 @@
 # Verification: Typst rendering engine
 
+> Historical document retained from upstream. It describes an earlier server revision, not the current local wrapper. See the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md).
+
 Completed on 2026-10-06. Runtime: Go 1.27.0, Typst 0.15.1 (9dfd3a08), Windows Git 2.47.1; Linux Docker Engine 29.1.2. Container tests use Alpine Git 2.54.0 and Gitea 28.0.0 rootless.
 
 ## Automated checks

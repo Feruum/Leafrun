@@ -1,22 +1,22 @@
 sequenceDiagram
-    participant Editor as Веб-редактор
+    participant Editor as Web editor
     participant API as Leafrun API
     participant DB as PostgreSQL
-    participant Git as Git-модуль / Gitea
-    Editor->>API: Файлы, base_commit, operation_id
-    API->>DB: Проверить роль, резерв записи, операцию
-    API->>Git: Подготовить коммит и проверить текущую ветку
-    alt base_commit совпал
-        Git->>Git: Обновить ветку с проверкой старого SHA
+    participant Git as Git module / Gitea
+    Editor->>API: Files, base_commit, operation_id
+    API->>DB: Check role, quota, operation
+    API->>Git: Prepare commit + check tip
+    alt base_commit matches
+        Git->>Git: CAS
         Git-->>API: commit_sha
-        API->>DB: Завершить операцию, квоту и аудит
-        API-->>Editor: Сохранено: новый SHA
-        Editor->>API: Создать сборку этого SHA
-        API-->>Editor: 202, render_id и статус
-    else Ветку изменил другой редактор
+        API->>DB: Finalize operation, quota and audit
+        API-->>Editor: Saved: new SHA
+        Editor->>API: Create render for this SHA
+        API-->>Editor: 202, render_id and status
+    else Another editor changed the branch
         Git-->>API: source_conflict, current_sha
-        API->>DB: Завершить конфликт, вернуть резерв
-        API-->>Editor: 409: сравнить версии и повторить сохранение
+        API->>DB: Record conflict + release quota
+        API-->>Editor: 409: compare + retry
     end
-    Note over API,Git: После сбоя восстановление сверяет operation_id и Git
-    Note over Editor,API: Внешний Git сначала подключается только на чтение
+    Note over API,Git: Recover using operation_id
+    Note over Editor,API: External Git is read-only

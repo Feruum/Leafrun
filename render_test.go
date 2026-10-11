@@ -19,7 +19,7 @@ func TestRender(t *testing.T) {
 		files := map[string]string{
 			"main.typ":          "#include \"sections/body.typ\"",
 			"sections/body.typ": "#let data = json(\"/data.json\")\n= #data.title\n#image(\"/assets/logo.svg\", width: 1cm)",
-			"data.json":         "{\"title\":\"Проверка PDF\"}",
+			"data.json":         "{\"title\":\"PDF verification\"}",
 			"assets/logo.svg":   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"green\"/></svg>",
 		}
 		for name, content := range files {

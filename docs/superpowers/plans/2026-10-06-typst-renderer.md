@@ -1,5 +1,7 @@
 # Typst Renderer Implementation Plan
 
+> Historical document retained from upstream. It describes an earlier server revision, not the current local wrapper. See the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md).
+
 > **For agentic workers:** Use executing-plans to implement this plan task by task, with test-driven development and a final code review.
 
 **Goal:** Deliver a synchronous Git-to-PDF API and a self-hosted Gitea deployment.

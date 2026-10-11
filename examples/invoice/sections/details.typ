@@ -4,7 +4,7 @@
 #table(
   columns: (1fr, auto, auto),
   inset: 8pt,
-  [Позиция], [Количество], [Цена],
+  [Item], [Quantity], [Price],
   ..items.map(item => (
     item.description,
     str(item.quantity),
@@ -12,4 +12,4 @@
   )).flatten(),
 )
 
-Сформировано автоматически из локального проекта и JSON.
+Generated automatically from a local project and JSON.

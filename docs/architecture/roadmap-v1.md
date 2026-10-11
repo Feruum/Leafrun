@@ -1,72 +1,72 @@
-# Leafrun: этапы реализации SaaS
+# Leafrun: historical SaaS implementation stages
 
-> Статус на 9 октября 2026: текущий код — локальная Go-функция рендера. Галочки этапа 0 ниже относятся к прежней серверной версии на коммите `d77d9a9`; планы SaaS сохранены.
+> Historical roadmap, retained from upstream. Superseded by the [current 16-milestone roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md) and [SOA architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md). As of October 9, 2026, this checkout contains a local Go rendering function. Checked items in stage 0 refer to the earlier server at commit `d77d9a9`.
 
-7 октября 2026 года. План декомпозиции [архитектуры v1](leafrun-saas-v1.md). Галочки показывают существующий код; остальные пункты являются будущими задачами.
+October 7, 2026. Decomposition of the [v1 architecture](leafrun-saas-v1.md). Checkboxes record that historical revision; unchecked items were future work.
 
-## Этап 0. Движок PDF
+## Stage 0. PDF engine
 
-- [x] Go API принимает Git-проект, ref, entrypoint и JSON, возвращает PDF и SHA.
-- [x] Кэш, отдельные worktree, лимиты, отмена и очистка проверены.
-- [x] Собственная Gitea, приватное чтение, импорт истории и сохранение данных проверены.
-- [x] Docker, пример Typst, изображения, шрифты, пакеты и инструкция поставлены.
+- [x] Go API accepts a Git project, ref, entry point and JSON and returns PDF and SHA.
+- [x] Cache, separate worktrees, limits, cancellation and cleanup checked.
+- [x] Hosted Gitea, private reads, history import and persistence checked.
+- [x] Docker, Typst example, images, fonts, packages and instructions delivered.
 
-Доказательство: [verification-2026-10-06.md](../superpowers/verification-2026-10-06.md). Этот этап даёт основу компиляции; новый интерфейс SaaS пока не реализован.
+Evidence: [October 6 verification](../superpowers/verification-2026-10-06.md). This supplies the compilation foundation; the new SaaS interface was not implemented.
 
-## Этап 1. Первый полный сценарий пользователя
+## Stage 1. First complete user workflow
 
-Цель: один человек входит в Leafrun, создаёт проект, сохраняет документ, собирает и скачивает PDF.
+Goal: one person signs in, creates a project, saves a document, renders and downloads a PDF.
 
-- [ ] PostgreSQL: users, sessions, workspaces, memberships, projects, Git connections, render jobs, attempts, inputs, artifacts, reservations, audit, outbox.
-- [ ] Регистрация, подтверждение email, вход/выход, восстановление; ограничение попыток и защита cookie/CSRF.
-- [ ] Личное пространство и проверяемый контекст доступа на каждом пути.
-- [ ] Создание приватного managed-репозитория из фиксированного шаблона, квота записи и обратимое восстановление незавершённой операции.
-- [ ] Страница проектов, дерево файлов и редактор с явным сохранением; Git-коммит с base_commit и ответом о конфликте.
-- [ ] PostgreSQL-очередь, закрепление SHA, аренда/heartbeat, попытки, отмена и приватные результаты.
-- [ ] Доверенный контроллер и отдельная среда выполнения на задачу; адаптер существующего compiler-кода.
-- [ ] История сборок, коды ошибок, PDF-панель и аудит действий.
-- [ ] Проверенный Markdown-адаптер и отдельный Typst-шаблон; тесты Unicode, изображений и неподдерживаемых конструкций.
+- [ ] PostgreSQL: users, sessions, workspaces, memberships, projects, Git connections, render jobs, attempts, inputs, artifacts, reservations, audit and outbox.
+- [ ] Registration, verified email, login/logout and recovery; attempt limits, cookie and CSRF protection.
+- [ ] Personal workspace and verified access context on every path.
+- [ ] Private managed repository creation from a fixed template, write quota and recoverable incomplete operations.
+- [ ] Project page, file tree and editor with explicit save; Git commit with `base_commit` and conflict response.
+- [ ] PostgreSQL queue, SHA pins, lease/heartbeat, attempts, cancellation and private results.
+- [ ] Trusted controller and isolated environment per job; adapter around existing compiler code.
+- [ ] Render history, error codes, PDF panel and action audit.
+- [ ] Verified Markdown adapter and separate Typst template; Unicode, image and unsupported-construct tests.
 
-Приёмка: пользователь проходит этот сценарий через веб-интерфейс; два пространства не видят данные друг друга; процесс с ошибкой или отменой не оставляет активное исполнение. Сохранённый SHA совпадает с манифестом и PDF. Изменение исходников не требует ручного Git от пользователя.
+Acceptance: complete the workflow in the browser; two workspaces cannot see one another's data; failed or cancelled work leaves no running execution. The saved SHA matches the manifest and PDF. Users edit without manually operating Git.
 
-## Этап 2. Боты, внешние Git и ограниченная бета
+## Stage 2. Bots, external Git and limited beta
 
-- [ ] Ключи ботов со scope, проектами, сроком и отзывом; права владельца проверяются при запросе и отложенном запуске.
-- [ ] Публичный контракт `/v1`, примеры клиента, пагинация, Idempotency-Key и документированные ошибки.
-- [ ] Внешние подключения на чтение, серверные правила адресов, изолированная подготовка исходников и encrypted credentials.
-- [ ] Импорт внешнего проекта как независимой managed-копии с историей и проверкой объёма.
-- [ ] Atomic quotas, месячные резервы, предел результатов/очереди, справедливость и частота запросов.
-- [ ] Экспорт проекта, удаление результатов, политика срока хранения и уборка orphan-объектов.
-- [ ] Негативные проверки аренды, SSRF, чужих данных, превышения диска/памяти и гонки отмены/публикации.
-- [ ] Резервная копия и восстановление на чистом окружении.
+- [ ] Bot keys with scopes, projects, expiry and revocation; owner rights checked at request and deferred execution.
+- [ ] Public `/v1` contract, client examples, pagination, idempotency and documented errors.
+- [ ] Read-only external connections, server address rules, isolated source preparation and encrypted credentials.
+- [ ] Independent managed imports preserving external history and checking size.
+- [ ] Atomic quotas, monthly reservations, output/queue limits, fairness and request rate limits.
+- [ ] Project export, output deletion, retention policy and orphan cleanup.
+- [ ] Negative tests for leases, SSRF, cross-tenant access, disk/memory overflow and cancellation/publication races.
+- [ ] Backup and restore on a clean environment.
 
-Приёмка: бот повторяет запрос без двойного списания, рендерит разрешённый внешний проект и скачивает только свои результаты. Отключённый Git даёт ясную ошибку. Бета запускается с ограниченным числом пользователей и глобальным бюджетом ресурсов.
+Acceptance: an idempotent bot request does not charge twice; it renders an authorized external project and downloads only authorized results. Disconnected Git returns a clear error. Beta has bounded users and a global resource budget.
 
-## Этап 3. Команды и платные возможности
+## Stage 3. Teams and paid features
 
-- [ ] Приглашения, роли, несколько участников и принадлежность компании.
-- [ ] Ровно один Owner, атомарная передача владения и резерв лимита участников при принятии приглашения.
-- [ ] Смена роли, отзыв ключа и удаление пользователя не оставляют новые права в очереди.
-- [ ] Тарифы как серверные entitlements, просмотр использования и поведение понижения тарифа.
-- [ ] Ручное назначение тарифа, затем платёжный адаптер с проверкой подписи и дедупликацией событий.
-- [ ] Аудит команды, фильтры и экспорт в пределах роли/тарифа.
-- [ ] Совместное сохранение через Git: конфликты, сравнение и история авторов.
+- [ ] Invitations, roles, multiple participants and company ownership.
+- [ ] Exactly one Owner, atomic ownership transfer and member-capacity reservation on invitation acceptance.
+- [ ] Role changes, key revocation and user removal cannot leave newly authorized work in the queue.
+- [ ] Server-side plan entitlements, usage display and downgrade behavior.
+- [ ] Manual plan assignment, then payment adapter with signatures and event deduplication.
+- [ ] Team audit, filtering and export within role/plan.
+- [ ] Shared Git saves: conflicts, comparison and authorship history.
 
-Приёмка: приглашённый участник имеет ровно свою роль; квоты общие для workspace; повторная доставка события оплаты не меняет права дважды. Стоимость и цены определены по измерениям, а не предположению.
+Acceptance: invitees receive exactly their roles; quotas are workspace-wide; repeated payment events cannot apply rights twice. Determine costs and prices from measurements.
 
-## Этап 4. Рост и эксплуатация
+## Stage 4. Growth and operations
 
-- [ ] Метрики очереди, сборок, ошибок, диска и ресурсов; операторские пороги и алерты.
-- [ ] Несколько execution-узлов и общее приватное хранилище результатов/входов.
-- [ ] Несколько API, ограниченные соединения БД и тесты отказа отдельных процессов.
-- [ ] Масштабирование числа исполнителей по очереди и загрузке; отдельно ёмкость серверов.
-- [ ] Минимум/максимум, стабилизация, бюджет и поведение при исчерпании бюджета.
-- [ ] Регулярная проверка восстановления и выбор более строгих целей доступности.
+- [ ] Queue, render, error, disk and resource metrics; operator thresholds and alerts.
+- [ ] Multiple execution nodes and shared private input/output storage.
+- [ ] Multiple API instances, bounded database connections and process-failure tests.
+- [ ] Worker scaling from queue/load signals, separately from server capacity.
+- [ ] Minimum/maximum, stabilization, budget and exhaustion behavior.
+- [ ] Regular recovery drills and explicit selection of stricter availability goals.
 
-Приёмка: увеличение исполнителей снижает ожидание, не меняет версию документа и не нарушает изоляцию; потеря узла допускает повтор задачи и одну публикацию. Исполнение ограничено бюджетом даже при всплеске бесплатных запросов.
+Acceptance: additional workers reduce wait without changing source revision or isolation. Node loss permits retry but only one publication. Execution stays within budget even during free-request spikes.
 
-## Отдельные последующие направления
+## Later directions
 
-Одновременное редактирование текста, SSO/OIDC, права на отдельные проекты для людей, запись во внешний Git, webhook/расписания, выделенные корпоративные среды, история предпросмотра и визуальный редактор шаблонов получают отдельные спецификации. Они не должны мешать первому полному сценарию.
+Simultaneous editing, SSO/OIDC, per-project human permissions, external Git writes, webhooks/schedules, dedicated enterprise environments, preview history and a visual template editor require separate specifications. They must not block this historical first complete workflow.
 
-Ближайшая задача разработки: [фундамент PostgreSQL и изоляция workspace](../superpowers/plans/2026-10-07-workspace-foundation.md). Затем добавляем аккаунт и личное пространство, связываем создание проекта, сохранение и очередь в один проверяемый сценарий. Этот документ фиксирует порядок и критерии; код SaaS ещё не реализован.
+The next task at the time was [PostgreSQL foundation and workspace isolation](../superpowers/plans/2026-10-07-workspace-foundation.md), followed by accounts/personal workspaces and an integrated create/save/queue path. This document describes order and acceptance, not completed SaaS code.

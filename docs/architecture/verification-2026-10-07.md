@@ -1,21 +1,23 @@
-# Проверка проектирования Leafrun SaaS v1
+# Leafrun SaaS v1 design verification
 
-7 октября 2026 года. Проверены документы, схемы и изменения [доски Miro](https://miro.com/app/board/uXjVEd6scg8=/). Это отчёт о проектировании; новые функции SaaS здесь не объявляются реализованными.
+> Historical document, retained from the upstream repository. Superseded by the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md) and [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md). Implementation claims refer to the dated historical revision, not this checkout.
+
+October 7, 2026. This report checks documents, diagrams and changes to the [Miro board](https://miro.com/app/board/uXjVEd6scg8=/). It does not claim that the proposed SaaS features were implemented.
 
 ## Miro
 
-- Live-индекс доски: 95 элементов, 16 frames, 12 diagram, 3 table, 61 textArea и 3 sticky.
-- Добавлены 10 разделов, 7 схем, 3 таблицы и навигация с реальными ссылками на разделы.
-- Операции записи завершились успешно, без failed/skipped items. Старые схемы прочитаны повторно; их Mermaid-исходники совпадают с состоянием до расширения.
-- Повторно прочитаны 56 элементов новой главы и заголовков. Для 10 схем/таблиц использованы `data-rendered-bounds`; для 36 текстов — фактические координаты и размеры native text из live-read.
-- Проверены 46 содержательных блоков без фоновых frames: пересечений нет, неизвестных размеров нет. Предыдущий пользовательский макет рассматривается отдельно; его разделы не переносились.
-- Таблицы получились 1186 × 808, 1524 × 792 и 1186 × 693; содержимое помещается в отведённые разделы. Новые диаграммы на доске — 1600 × 900.
+- Live board index: 95 items, 16 frames, 12 diagrams, 3 tables, 61 text areas and 3 sticky notes.
+- Added 10 sections, 7 diagrams, 3 tables and navigation using actual section links.
+- Writes completed without failed or skipped items. Earlier diagrams were read back; their Mermaid sources matched the state before expansion.
+- Read back 56 items in the new chapter and headings. Used `data-rendered-bounds` for 10 diagrams/tables and actual native-text coordinates and sizes for 36 text items.
+- Checked 46 content blocks excluding background frames: no overlaps and no unknown dimensions. The previous user layout was treated separately; its sections were not moved.
+- Tables measured 1186 × 808, 1524 × 792 and 1186 × 693 and fit their sections. New board diagrams measured 1600 × 900.
 
-## Файлы
+## Files
 
-Проверка локальным Mermaid 11.4.1: все 12 `.mmd` разобраны без ошибок. Для семи новых схем выполнен рендер SVG и просмотр примеров. Miro также принял новые диаграммы своим конвертером. Настройки и синтаксис ограничены конструкциями, подходящими формату Mermaid Miro.
+Local Mermaid 11.4.1 parsed all 12 `.mmd` files. The seven new diagrams were rendered to SVG and samples were inspected. Miro also accepted them through its converter. Settings and syntax were restricted to constructs supported by Miro's Mermaid format.
 
-Команды проверки выполнялись из корня репозитория с доступным bundled Node:
+Commands ran from the repository root with bundled Node available:
 
 ```powershell
 node .cache/mermaid/verify-architecture.cjs
@@ -23,22 +25,22 @@ node .cache/mermaid/check-plan-code.cjs
 git diff --check
 ```
 
-Проверены локальные ссылки документов и отсутствие маркеров незавершённого кода в первом плане. `gofmt` успешно разобрал оба полных Go-примера плана PostgreSQL. Это проверка синтаксиса примеров, а не запуск будущих интеграционных проверок БД. Временные проверочные скрипты находятся в игнорируемом `.cache`, результаты и исходники схем — в документации.
+Local document links and the absence of unfinished-code markers in the first plan were checked. `gofmt` parsed both complete Go examples in the PostgreSQL plan. This checked example syntax, not the future database integration tests. Temporary verification scripts live in ignored `.cache`; diagram sources and results live in documentation.
 
-## Покрытие требований и границы результата
+## Requirements and limits
 
-| Требование | Где описано |
+| Requirement | Location |
 |---|---|
-| Пользователь и бот, Typst/Markdown, веб-редактор | Спецификация v1, разделы 3/4/6; Miro 08–10 |
-| Собственная Gitea и подключённые Git | Спецификация v1, раздел 5; Miro 03/08/09 |
-| Версии, очередь, повторы и отмена | Спецификация v1, раздел 7; Miro 02/11 |
-| Доступ и изоляция исполнения | Спецификация v1, разделы 4/8; Miro 04/12 |
-| Free/платные тарифы, компании и совместная работа | Спецификация v1, разделы 4/9; Miro 13 |
-| Аудит, логирование и наблюдение нагрузки | Спецификация v1, раздел 10; Miro 14 |
-| Расширение серверов и предел расходов | Спецификация v1, раздел 11; Miro 05/14 |
-| Сбой, резервные копии и восстановление | Спецификация v1, раздел 11; Miro 15 |
-| Порядок разработки и приёмка | Roadmap v1; Miro 16; план PostgreSQL |
+| People and bots, Typst/Markdown, web editor | v1 sections 3/4/6; Miro 08–10 |
+| Hosted Gitea and connected Git providers | v1 section 5; Miro 03/08/09 |
+| Revisions, queue, retries and cancellation | v1 section 7; Miro 02/11 |
+| Access and execution isolation | v1 sections 4/8; Miro 04/12 |
+| Free/paid plans, companies and collaboration | v1 sections 4/9; Miro 13 |
+| Audit, logging and load monitoring | v1 section 10; Miro 14 |
+| Scaling servers and spending limits | v1 section 11; Miro 05/14 |
+| Failure, backups and recovery | v1 section 11; Miro 15 |
+| Development order and acceptance | Roadmap v1; Miro 16; PostgreSQL plan |
 
-В этом изменении нет нового runtime-кода, миграций БД или запуска платных серверов. Действующий движок проверялся отдельно: [отчёт от 6 октября](../superpowers/verification-2026-10-06.md). Первые миграции и проверки настоящего PostgreSQL приведены в [плане реализации](../superpowers/plans/2026-10-07-workspace-foundation.md); выполнять их нужно при разработке этого подраздела.
+This change included no runtime code, database migrations or paid server provisioning. The earlier engine was checked separately in the [October 6 report](../superpowers/verification-2026-10-06.md). Initial migrations and real PostgreSQL tests are prescribed by the [implementation plan](../superpowers/plans/2026-10-07-workspace-foundation.md); run them when implementing that component.
 
-Основные документы: [спецификация](leafrun-saas-v1.md), [схемы](board-index.md), [этапы](roadmap-v1.md).
+References: [specification](leafrun-saas-v1.md), [diagrams](board-index.md), [stages](roadmap-v1.md).

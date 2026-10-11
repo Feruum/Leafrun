@@ -1,19 +1,19 @@
 flowchart TB
-    User["Пользователь"] --> Web["Веб-интерфейс<br/>проекты, редактор, история"]
-    Bot["Бот или интеграция"] --> API
+    User["User"] --> Web["Web editor<br/>projects + history"]
+    Bot["Bot / integration"] --> API
     Web --> API
 
-    subgraph App["Приложение Leafrun · один Go-бэкенд"]
-        API["Публичный API<br/>сессии и ключи ботов"]
-        Core["Модули приложения<br/>доступы, проекты, квоты, сборки и аудит"]
+    subgraph App["Leafrun Go backend"]
+        API["Public API<br/>sessions + bot keys"]
+        Core["Modules<br/>access · projects · jobs · audit"]
         API --> Core
     end
 
-    Core --> DB[("PostgreSQL<br/>аккаунты, проекты, очередь, аудит")]
-    Core --> Git["Git-модуль<br/>доступ к исходникам и фиксация версии"]
-    Git --> Gitea[("Собственная Gitea<br/>исходники и история")]
-    Git --> External["GitHub · GitLab · Bitbucket<br/>репозитории пользователя"]
-    Worker["Процессы сборки<br/>используют готовый движок Leafrun"] -->|"задание и статус"| DB
-    Worker -->|"точная версия проекта"| Git
-    Worker -->|"запись PDF"| Files[("Приватное хранилище результатов<br/>PDF с ограниченным сроком жизни")]
-    API -->|"скачивание после проверки доступа"| Files
+    Core --> DB[("PostgreSQL<br/>data + queue")]
+    Core --> Git["Git module<br/>revision capture"]
+    Git --> Gitea[("Gitea<br/>sources + history")]
+    Git --> External["External Git<br/>user repositories"]
+    Worker["Render workers"] -->|"job and status"| DB
+    Worker -->|"exact project revision"| Git
+    Worker -->|"write PDF"| Files[("Private PDF storage<br/>limited lifetime")]
+    API -->|"authorized download"| Files

@@ -1,130 +1,126 @@
-# Leafrun SaaS: проектирование v1
+# Leafrun SaaS: design v1
 
-> Статус на 9 октября 2026: рабочий код упрощён до локальной функции `Render(repoPath)`. HTTP-движок и его обвязка удалены; таблица готовности ниже описывает прежнюю версию на коммите `d77d9a9`. Схема SaaS остаётся проектированием.
+> Historical design, retained from upstream. Superseded by the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md) and [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md). As of October 9, 2026, executable code was simplified to `Render(repoPath)`. The HTTP engine and surrounding services discussed as implemented below belong to historical commit `d77d9a9`.
 
-7 октября 2026 года. Полный черновик для обсуждения и последующей разработки. [Доска Miro](https://miro.com/app/board/uXjVEd6scg8=/), [навигатор схем](board-index.md), [исходная архитектура v0](leafrun-saas-v0.md), [этапы реализации](roadmap-v1.md).
+October 7, 2026. Draft for discussion and later implementation. [Miro board](https://miro.com/app/board/uXjVEd6scg8=/), [diagram index](board-index.md), [original v0](leafrun-saas-v0.md), [implementation stages](roadmap-v1.md).
 
-Этот документ описывает целевую платформу. В текущем репозитории реализован движок генерации PDF; функции SaaS ниже остаются проектными решениями. Цифры тарифов, сроки хранения и эксплуатационные пределы предложены как исходные настройки, а не коммерческие обязательства.
+SaaS features below were design decisions, not completed functionality. Plan numbers, retention and operational limits were proposed starting settings, not commercial commitments.
 
-## 1. Продукт и фактическая готовность
+## 1. Product and readiness
 
-Leafrun позволяет человеку создать документ из шаблона, редактировать исходники, собрать PDF и посмотреть историю. Бот использует тот же проект через API и подставляет JSON для счетов, отчётов и других документов. Все исходники, изображения, проектные шрифты и история изменений находятся в Git.
+Leafrun lets a person create a document from a template, edit sources, render a PDF and inspect history. A bot uses the same project through an API, supplying JSON for invoices, reports and other documents. Git stores source files, images, project fonts and change history.
 
-| Возможность | Сейчас | Целевое поведение |
+| Capability | Historical server status | Intended development |
 |---|---|---|
-| Git → Typst → PDF | Реализовано и проверено | Переиспользовать движок в сборщиках SaaS |
-| Синхронный `POST /api/render` | Реализовано | Сохранить внутренний интерфейс; добавить публичные задачи `/v1` |
-| Кэш, SHA, force-push, лимиты, очистка | Реализовано | Дополнить очередью, закреплёнными версиями и изоляцией клиентов |
-| Собственная Gitea и импорт истории | Реализовано | Управлять проектами через интерфейс Leafrun |
-| Публичные внешние Git-проекты | Реализовано | Добавить подключения с учётными данными конкретного пространства |
-| Технические JSON-логи | Реализовано | Добавить аудит пользователя, поиск, метрики и идентификаторы запросов |
-| Markdown → PDF | Требуется разработать | Адаптер Markdown поверх Typst |
-| Аккаунты, редактор, команды, тарифы | Требуется разработать | Полноценные сценарии пользователей и компаний |
-| Автоматическое масштабирование | Требуется разработать | Рост сборщиков и серверов по нагрузке, с бюджетным пределом |
+| Git → Typst → PDF | Implemented and checked | Reuse the engine in SaaS workers |
+| Synchronous `POST /api/render` | Implemented | Keep an internal interface; add public `/v1` jobs |
+| Cache, SHA, force-push, limits and cleanup | Implemented | Add queueing, revision pins and tenant isolation |
+| Hosted Gitea and history import | Implemented | Manage projects through Leafrun |
+| Public external Git projects | Implemented | Add workspace-specific credentials |
+| Technical JSON logs | Implemented | Add user audit, search, metrics and request IDs |
+| Markdown → PDF | Planned | Markdown adapter over Typst |
+| Accounts, editor, teams and plans | Planned | Complete personal and company workflows |
+| Automatic scaling | Planned | Worker and node scaling within a budget |
 
-Доказательства проверки движка находятся в [отчёте от 6 октября](../superpowers/verification-2026-10-06.md). Проектирование SaaS не означает, что эти новые функции уже работают. Процент готовности пока не считаем: трудоёмкость редактора, доступа, оплаты и эксплуатации различается.
+The [October 6 report](../superpowers/verification-2026-10-06.md) records engine evidence. No overall completion percentage was assigned: editor, access, billing and operations differ substantially in effort.
 
-## 2. Выбранная архитектура и альтернативы
+## 2. Architecture and alternatives
 
-Рекомендуемый старт: модульное приложение Go, PostgreSQL для данных и очереди, собственная Gitea, приватное хранилище результатов и отдельный контроллер сборок. Веб-интерфейс отдаёт то же приложение; TypeScript и редактор исходников собираются в статические файлы. Нет необходимости разворачивать отдельный сервис для каждого модуля.
+The historical starting choice was a modular Go application, PostgreSQL for data and queueing, hosted Gitea, private output storage and a separate render controller. The same application serves static TypeScript/editor assets. Modules need not be separate services in this earlier design.
 
-| Вариант | Польза | Цена сложности | Решение |
+| Option | Benefit | Cost | Historical decision |
 |---|---|---|---|
-| Go-приложение, PostgreSQL-очередь, отдельные сборщики | Мало обязательных сервисов, простые транзакции и отладка | Придётся реализовать аренды, уборку и справедливую выдачу задач | Используем для MVP |
-| Отдельный брокер и сервисы доступа, биллинга, Git, задач | Независимая нагрузка и команды разработки | Больше инфраструктуры и распределённых сбоев | Разделяем по измеренным причинам |
-| Kubernetes и набор облачных сервисов сразу | Готовые механизмы размещения и роста | Расходы и эксплуатация до появления пользователей | Следующий этап при реальной нагрузке |
+| Go application, PostgreSQL queue, separate workers | Few mandatory services, simple transactions and debugging | Implement leases, cleanup and fairness | MVP choice |
+| Broker and separate access, billing, Git and job services | Independent scaling and development ownership | More infrastructure and distributed failures | Split for measured reasons |
+| Kubernetes and cloud services immediately | Placement and scaling mechanisms | Operational costs before users | Defer until justified by load |
 
-Логические модули приложения:
-
-| Модуль | Отвечает за | Основная зависимость |
+| Module | Responsibility | Main dependency |
 |---|---|---|
-| Identity | Аккаунты, сессии, восстановление доступа, ключи ботов | PostgreSQL, отправка почты |
-| Workspaces | Участники, роли, текущие разрешения | Identity, PostgreSQL |
-| Projects | Проекты, шаблоны, редактор, история | Workspaces, Git |
-| Git | Провайдеры, коммиты, импорт, выбор и закрепление SHA | Gitea, внешние Git-системы |
-| Renders | Приём заданий, состояния, отмена, попытки | Git, Quotas, очередь |
-| Quotas | Разрешения тарифа, резервы, списания | PostgreSQL |
-| Artifacts | Приватные PDF, диагностика, сроки хранения | Локальный том или общее хранилище |
-| Audit | Журнал действий с проверкой доступа | PostgreSQL |
-| Billing | Назначение тарифов и события оплаты | Quotas, будущий платёжный адаптер |
+| Identity | Accounts, sessions, recovery, bot keys | PostgreSQL, email |
+| Workspaces | Membership, roles, current permissions | Identity, PostgreSQL |
+| Projects | Projects, templates, editor, history | Workspaces, Git |
+| Git | Providers, commits, import, SHA resolution and pins | Gitea, external Git |
+| Renders | Admission, state, cancellation, attempts | Git, Quotas, queue |
+| Quotas | Entitlements, reservations, charges | PostgreSQL |
+| Artifacts | Private PDFs, diagnostics, retention | Local or shared storage |
+| Audit | Authorized action history | PostgreSQL |
+| Billing | Plan assignment and payment events | Quotas, future payment adapter |
 
-Контроллер сборок берёт задание, получает разрешённую версию проекта, запускает отдельную среду Typst и публикует результат. Сам процесс компиляции не получает доступ к базе, провайдерам Git, оплате или ключам других задач.
+The controller claims a job, obtains its authorized source revision, starts an isolated Typst environment and publishes the result. The compiler gets no database, Git-provider, billing or other-job credentials.
 
-## 3. Форматы документов и редактор
+## 3. Document formats and editor
 
-Typst компилирует свою разметку `.typ`. Markdown добавляем отдельным адаптером, например [cmarker](https://typst.app/universe/package/cmarker/), с закреплённой версией и `raw-typst: false`. Официальная документация пакета описывает поддержку CommonMark и включённые по умолчанию вставки Typst; совместимость адаптера с нашим Typst 0.15.1 проверяем до реализации сценария Markdown. Расширения Markdown и формулы проверяем отдельно, не обещаем поддержку любых конструкций.
+Typst compiles `.typ`. Markdown needs a pinned adapter such as [cmarker](https://typst.app/universe/package/cmarker/) with `raw-typst: false`. Its documented CommonMark and embedded-Typst behavior must be checked against Typst 0.15.1 before implementation. Test extensions and formulas separately; do not promise arbitrary syntax support.
 
-В проекте сохраняются `source_format` (`typst` или `markdown`), `entrypoint`, выбранный шаблон и его версия. Для Markdown временная обёртка `.typ` создаётся внутри рабочей папки; её версия входит в манифест сборки. Она не меняет пользовательский Git-проект. JSON передаётся через существующий механизм `sys.inputs.data_file`.
+Project metadata stores `source_format` (`typst` or `markdown`), `entrypoint`, template and template version. Markdown gets a temporary `.typ` wrapper inside the working directory; its version enters the render manifest without changing the user's Git project. JSON uses the earlier engine's `sys.inputs.data_file` mechanism.
 
-Первый редактор: дерево файлов, исходник слева, PDF справа, действия «Сохранить» и «Собрать», состояние задачи и ограниченная диагностика. Сборка использует сохранённый коммит. Нажатие «Собрать» сначала предлагает сохранить изменения; нельзя показывать старый PDF как результат несохранённого текста.
+The first editor has a file tree, source pane, PDF pane, Save and Render actions, job state and bounded diagnostics. Rendering uses a saved commit. Unsaved changes must be saved before rendering; an old PDF cannot be presented as the result of unsaved text.
 
-Автоматическую сборку после каждого нажатия клавиши в MVP не включаем: она расходует вычисления и бесплатную квоту. Позже добавим задержку перед предпросмотром, отмену устаревших задач и отдельную политику вычислений предпросмотра. Форматирование, импорт файлов и PDF доступны из одного проекта; Gitea хранит данные за интерфейсом.
+Rendering every keystroke was excluded from this MVP because it spends computation and free quota. Debounced preview, obsolete-job cancellation and separate preview compute policy were later work. Formatting, file import and PDF access belong to one project, with Gitea behind the UI.
 
-## 4. Аккаунты, команды и доступ
+## 4. Accounts, teams and access
 
-Единица владения и оплаты — workspace. Один человек может участвовать в нескольких пространствах; проект принадлежит ровно одному. В компании workspace имеет название организации, владельца, участников и общий тариф.
+A workspace owns projects and billing. A person can join multiple workspaces; each project belongs to exactly one. A company workspace has an organization name, owner, members and shared plan.
 
-Для MVP предлагаем регистрацию по email и паролю, подтверждение email, вход, выход и восстановление доступа. Сессии находятся на сервере; браузер получает `HttpOnly`, `Secure`, `SameSite` cookie, а изменения проверяют CSRF-защиту. Сброс пароля использует одноразовый токен с ограниченным сроком и отзывом сессий. Пароли хешируем Argon2id через поддерживаемую библиотеку; параметры проверяем нагрузочным измерением, ориентируясь на [OWASP Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). SSO/OIDC добавляем отдельным адаптером.
+The MVP proposal uses email/password registration, email verification, login/logout and recovery. Server-side sessions issue `HttpOnly`, `Secure`, `SameSite` cookies; mutations enforce CSRF protection. Password-reset tokens are single-use, expire and revoke sessions. Hash passwords using a maintained Argon2id library and measured parameters, informed by [OWASP Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). SSO/OIDC is a later adapter in this historical design.
 
-| Роль | Возможности |
+| Role | Permissions |
 |---|---|
-| Owner | Проекты, участники и их роли, ключи, тариф, экспорт и удаление своего пространства |
-| Admin | Проекты и подключения, приглашение Editor/Viewer, история и аудит; без передачи владения и оплаты |
-| Editor | Исходники, сохранение, сборка и результаты разрешённых проектов |
-| Viewer | Чтение разрешённых исходников, истории и PDF; без запуска сборок и изменения файлов |
+| Owner | Projects, members and roles, keys, plan, export and workspace deletion |
+| Admin | Projects, connections, Editor/Viewer invitations, history and audit; no ownership transfer or billing |
+| Editor | Authorized source reads, saving, rendering and results |
+| Viewer | Authorized sources, history and PDFs; no render admission or file changes |
 
-Первый командный тариф даёт доступ всем участникам к проектам пространства согласно роли. Ограничение роли отдельными проектами добавляется позднее отдельной таблицей разрешений. API-ключ уже в MVP можно ограничить конкретными проектами и действиями, например `renders:create`, `renders:read`, `artifacts:read`.
+The first team plan grants workspace project access according to membership role. Per-project human grants were later work. MVP API keys can already restrict projects and actions such as `renders:create`, `renders:read` and `artifacts:read`.
 
-У пространства ровно один Owner. Передача владения существующему участнику меняет роли одной транзакцией и попадает в аудит; нельзя удалить последнего владельца или оставить пространство без ответственного. Приглашение привязано к email, одноразовому токену и сроку, а принятие повторно проверяет доступный лимит участников. Параллельные приглашения не обходят этот лимит.
+Exactly one Owner must remain. Transfer to an existing member changes roles atomically and is audited. Invitations bind an email, single-use token and expiry; accepting rechecks and reserves member capacity so concurrent invitations cannot exceed the limit.
 
-Ключ бота создаёт Owner/Admin, секрет показывается один раз, в базе хранится его хеш и префикс для поиска. Есть отзыв, срок действия, владелец и журнал использования без самого секрета. При изменении роли или удалении владельца связанные ключи теряют соответствующие права. Каждый запрос проверяет текущую область доступа.
+Owner/Admin creates a bot key. Show its secret once; store a hash and lookup prefix. Support expiry, revocation, ownership and secret-free usage history. Removing the owner or reducing their role reduces associated key rights. Every request checks current scope.
 
-`workspace_id` из URL выбирает пространство, но сам по себе не разрешает доступ. Контекст привязываем к проверенной сессии/ключу и текущему членству; передаём его в задания, кэш и скачивание. Это соответствует [рекомендациям OWASP по изоляции клиентов](https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html). В схеме базы используем составные связи с `workspace_id`; запросы приложения работают ограниченной ролью, а политики PostgreSQL RLS проверяются отдельными негативными тестами. Контроллер очереди имеет отдельную системную роль и ограниченные операции выдачи заданий.
+A URL `workspace_id` selects context but does not authorize access. Bind it to a verified session/key and current membership; carry the context into jobs, cache and downloads. Use composite workspace relationships and a restricted application database role, plus negative tests for PostgreSQL RLS, following the [OWASP tenant-isolation guidance](https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html). The queue controller has a separate system role with narrowly scoped claim operations.
 
-Совместная работа в первой версии: приглашения, роли, общие проекты, история Git и обработка конфликтов. Одновременный ввод текста требует отдельного протокола синхронизации и рассматривается после MVP.
+Initial collaboration covers invitations, roles, shared projects, Git history and save conflicts. Simultaneous editing was deferred to a separate protocol after this historical MVP.
 
-## 5. Git-провайдеры и сохранение
+## 5. Git providers and saving
 
-Два режима проекта:
+Two proposed project modes:
 
-- `managed`: приватный репозиторий нашей Gitea, изменения записывает Git-модуль Leafrun. Пользователь работает в редакторе; платформа контролирует квоту записи.
-- `external_read_only`: подключённый GitHub/GitLab/Bitbucket или согласованный собственный Git-сервер. В первой версии Leafrun читает и собирает его; изменения пользователь отправляет обычным Git.
+- `managed`: a private hosted-Gitea repository written by Leafrun's Git module; the editor enforces write quota.
+- `external_read_only`: connected GitHub/GitLab/Bitbucket or an approved self-hosted provider; Leafrun reads and renders while the user pushes changes through Git.
 
-Импорт внешнего проекта в managed создаёт самостоятельную копию с историей, если она помещается в тариф. Импорт идёт в закрытое промежуточное хранилище и становится видимым после проверки размера. Последующие изменения upstream не перезаписывают эту копию автоматически. Обновление из upstream и запись обратно во внешний Git требуют явного отдельного действия.
+Import creates an independent managed copy with history if it fits the plan. Stage privately, check size, then expose it. Upstream changes do not automatically overwrite the copy; pulling upstream updates and pushing externally require separate explicit actions.
 
-Сохранение передаёт `base_commit` и изменённые файлы. Git-модуль сериализует запись в выбранную ветку, повторно сверяет её вершину и создаёт коммит. Изменение ветки другим редактором даёт `409 source_conflict`; несохранённый текст остаётся у клиента для сравнения и слияния. Изменения проекта и аудита связываются идентификатором операции; уборка обнаруживает незавершённые операции после сбоя между Git и PostgreSQL.
+Saving supplies `base_commit` and changed files. Serialize writes to the branch, recheck its tip and create the commit. A changed branch returns `409 source_conflict`; retain unsaved client text for comparison and merge. An operation ID ties Git, project metadata and audit together; reconciliation detects interruption between Git and PostgreSQL.
 
-Для managed-проектов прямые пользовательские push в Gitea не входят в MVP. Все записи проходят проверку квоты Leafrun. Если позже откроем Git-push, этот путь обязан обеспечивать те же ограничения; одних проверок веб-редактора недостаточно.
+Direct user pushes to managed Gitea are outside the MVP. Every write passes Leafrun quotas; future Git-push support must enforce the same limits.
 
-Подключение принадлежит workspace, содержит адрес провайдера, идентификатор репозитория, режим и зашифрованные учётные данные. Настройки адресов серверные, токены не находятся в URL, Git-конфиге проекта или логах. Учётные данные не разделяются между пространствами. Ключ кэша учитывает workspace, подключение, репозиторий и версию доступа.
+A connection belongs to a workspace and stores provider address, repository identity, mode and encrypted credentials. Server-controlled address rules apply. Tokens never enter URLs, project Git configuration or logs, and are not shared across workspaces. Cache identity includes workspace, connection, repository and access version.
 
-Ref разрешаем в точный SHA до ответа о создании задачи, вне транзакции БД. Подготовка сохраняет этот коммит и служебный ref в приватной Git-копии для повторов. Если force-push сделал коммит недоступным до получения копии, задача получает `source_revision_unavailable`; переход на новый HEAD запрещён. После закрепления повторы используют ту же версию. У копии есть срок, владельцы-lease и отдельный дисковый лимит.
+Resolve ref to exact SHA before acknowledging admission, outside the database transaction. Preparation captures that commit and a service ref in a private retry copy. If force-push removes the commit before capture, return `source_revision_unavailable`; never substitute a new HEAD. Retried attempts use the pinned revision. Pins have retention, holder leases and separate disk budgets.
 
-Закрепление сохраняется как минимум до общего deadline задачи и завершения активной аренды с запасом для уборки; живое исполнение не теряет файлы из-за TTL. После терминального состояния копия и приватный JSON удаляются по ограниченной политике очистки. PDF хранится отдельно согласно тарифу.
+Keep pins through the overall deadline and active lease plus cleanup margin. After termination, remove the copy and private JSON under bounded cleanup policy. Store PDFs separately according to the historical plan policy.
 
-Обычные файлы Git поддерживаются первыми. LFS, submodules и симлинки пока возвращают явную ошибку, как в текущем движке. Полная история, импорт и временные Git-объекты имеют собственный предел, потому что размер checkout не ограничивает размер скачивания.
+Support ordinary Git files first. LFS, submodules and symlinks initially return explicit errors, matching the earlier engine. Full history, imports and temporary Git objects need limits independent of checkout size.
 
-## 6. API для пользователей и ботов
+## 6. User and bot API
 
-Контракт ниже — будущий публичный API. Текущий работающий маршрут остаётся `POST /api/render` с серверным ключом.
+These were future public routes; `POST /api/render` was the working route in the earlier server revision, not in the current local-function checkout.
 
-| Маршрут | Назначение |
+| Route | Purpose |
 |---|---|
-| `POST /v1/workspaces` | Личное или командное пространство |
-| `GET /v1/workspaces/{id}/projects` | Проекты с пагинацией |
-| `POST /v1/workspaces/{id}/projects` | Создать managed-проект из шаблона или подключить внешний |
-| `GET /v1/projects/{id}/files` | Файлы конкретного коммита |
-| `POST /v1/projects/{id}/commits` | Сохранить файлы с `base_commit` |
-| `POST /v1/projects/{id}/renders` | Принять задачу и зафиксировать SHA |
-| `GET /v1/renders/{id}` | Состояние, SHA, время, доступная диагностика |
-| `GET /v1/renders/{id}/pdf` | Приватное скачивание PDF |
-| `POST /v1/renders/{id}/cancel` | Идемпотентная отмена |
-| `POST /v1/workspaces/{id}/api-keys` | Создать ключ с областью доступа |
-| `DELETE /v1/api-keys/{id}` | Отозвать ключ |
-| `GET /v1/workspaces/{id}/usage` | Использование и остатки лимитов |
-| `GET /v1/workspaces/{id}/audit` | Аудит в пределах роли и тарифа |
-
-Создание сборки:
+| `POST /v1/workspaces` | Personal or team workspace |
+| `GET /v1/workspaces/{id}/projects` | Paginated projects |
+| `POST /v1/workspaces/{id}/projects` | Managed template project or external connection |
+| `GET /v1/projects/{id}/files` | Files at a specific commit |
+| `POST /v1/projects/{id}/commits` | Save with `base_commit` |
+| `POST /v1/projects/{id}/renders` | Admit render and capture SHA |
+| `GET /v1/renders/{id}` | State, SHA, timing and authorized diagnostics |
+| `GET /v1/renders/{id}/pdf` | Private PDF download |
+| `POST /v1/renders/{id}/cancel` | Idempotent cancellation |
+| `POST /v1/workspaces/{id}/api-keys` | Create scoped key |
+| `DELETE /v1/api-keys/{id}` | Revoke key |
+| `GET /v1/workspaces/{id}/usage` | Usage and remaining limits |
+| `GET /v1/workspaces/{id}/audit` | Audit within role and plan |
 
 ```http
 POST /v1/projects/{project_id}/renders
@@ -134,135 +130,135 @@ Content-Type: application/json
 ```
 
 ```json
-{"ref":"main","entrypoint":"main.typ","data":{"title":"Счёт № 42"}}
+{"ref":"main","entrypoint":"main.typ","data":{"title":"Invoice No. 42"}}
 ```
 
-Успех: `202` с `render_id`, `state: queued`, `source_commit` и путями проверки/скачивания. Формат ввода по умолчанию берётся из проекта. JSON сохраняется как приватные входные данные задачи, не попадает в Git и удаляется после терминального состояния и окончания окна повторов.
+Return `202` with `render_id`, `state: queued`, `source_commit` and status/download paths. Input format defaults from the project. Store JSON privately, outside Git, until termination and the retry window end.
 
-Идемпотентность действует в пределах workspace: один ключ и тот же канонический запрос возвращают прежнюю задачу и её SHA. Ключ с другим проектом, ref или JSON даёт `409 idempotency_conflict`. Уникальность обеспечена базой; повторная попытка компиляции не создаёт новую пользовательскую задачу. Предлагаемый срок хранения ключа — 7 дней, независимо от срока хранения PDF. Клиенту сообщается срок, после которого ключ можно использовать как новый.
+Idempotency is workspace-scoped: the same key and canonical request return the original job and SHA. Different project, ref or JSON gives `409 idempotency_conflict`. Database uniqueness enforces it; another compilation attempt is not another user job. Proposed key retention is seven days independent of PDF retention; tell clients when reuse becomes a new request.
 
-| HTTP | Когда применяется |
+| HTTP | Meaning |
 |---|---|
-| 400 | Неверный JSON, ref, путь или поле |
-| 401 | Нет действующей сессии/ключа |
-| 403 | Известный пользователю ресурс, но недостаточно прав на действие |
-| 404 | Ресурс отсутствует или находится вне разрешённого пространства |
-| 409 | Конфликт Git, ключа идемпотентности или состояния |
-| 413 | Превышение размера входа, исходников или результата |
-| 429 | Квота, частота, заполненная очередь; возвращаем `Retry-After`, когда он известен |
-| 502/503 | Недоступен Git-провайдер или временно недоступен сервис при приёме |
+| 400 | Invalid JSON, ref, path or field |
+| 401 | Missing or invalid session/key |
+| 403 | Known resource, insufficient action rights |
+| 404 | Missing resource or outside authorized workspace |
+| 409 | Git, idempotency or state conflict |
+| 413 | Input, source or output too large |
+| 429 | Quota, rate or queue capacity; include `Retry-After` when known |
+| 502/503 | Git provider or admission service temporarily unavailable |
 
-После принятия задачи ошибки компиляции приходят в её состоянии `failed`, а не как ошибка уже завершённого POST. `GET` такого задания возвращает успешный HTTP-ответ с машинным кодом ошибки и ограниченной диагностикой. Скачивание требует `succeeded` и живой артефакт; истёкший PDF даёт `410 artifact_expired`, незавершённый — `409 artifact_not_ready`.
+Compilation failure after admission appears as job state `failed`; it does not retroactively fail the completed POST. Status GET returns a successful HTTP response with machine error code and bounded diagnostics. Downloads require `succeeded` and a live artifact: expiry returns `410 artifact_expired`, unfinished work `409 artifact_not_ready`.
 
-Первый бот проверяет состояние опросом. Доставка webhook, расписания и автоматические сборки по Git-событиям — отдельный этап: подпись события, уникальный `event_id`, повторы с задержкой и защита исходящих адресов. Даже подписанное Git-событие не заменяет серверную проверку репозитория и разрешений.
+The first bot polls. Webhooks, schedules and Git-triggered rendering require separate event signatures, unique IDs, delayed retries and outbound-address protection. A signed Git event does not replace repository and permission checks.
 
-## 7. Очередь, повторы, отмена и публикация
+## 7. Queue, retries, cancellation and publication
 
-PostgreSQL хранит задание, вход, выбранный SHA, резерв квоты, номер попытки, аренду и состояние. Выдача использует [блокировку с `SKIP LOCKED`](https://www.postgresql.org/docs/current/sql-select.html), но справедливость между workspace и аренды реализуются дополнительно. Сначала выбираем пространство с доступным слотом, затем самое раннее допустимое задание; один большой клиент не занимает всю очередь.
+PostgreSQL stores job, input, SHA, reservation, attempt number, lease and state. [`SKIP LOCKED`](https://www.postgresql.org/docs/current/sql-select.html) supports claiming; fairness and leases require additional logic. Select a workspace with a free slot, then its oldest eligible job, preventing a large tenant occupying the entire queue.
 
-Последовательность приёма: аутентификация → область доступа → существующий ключ → предварительная проверка лимитов → разрешение ref → транзакция с повторной проверкой ключа, атомарным резервом, приватным входом и состоянием queued. В MVP ограниченный JSON хранится в таблице входов в той же транзакции: исполнитель не увидит задачу без её данных. Сетевой запрос к Git не держит блокировку БД. Если входы позднее переедут в объектное хранилище, сначала записываем объект, затем публикуем ссылку и задачу одной транзакцией; уборка удаляет объекты без ссылок.
+Admission follows authentication → scope → existing key → preliminary limits → ref resolution → transaction that rechecks the key, atomically reserves quota, stores private input and creates queued state. Bounded JSON initially shares that transaction so workers never see a job without input. Git network calls do not hold database locks. Future object-backed inputs must upload first, then commit the reference with the job; collect unreferenced objects.
 
-Состояния: `queued`, `preparing`, `rendering`, `publishing`, `succeeded`, `failed`, `cancelling`, `canceled`, `expired`. Истечение PDF меняет доступность артефакта, а не исторический факт успешной сборки; истёкшее в очереди задание имеет состояние `expired`.
+States: `queued`, `preparing`, `rendering`, `publishing`, `succeeded`, `failed`, `cancelling`, `canceled`, `expired`. PDF expiry changes availability, not historical render success; a queued job whose deadline expires becomes `expired`.
 
-| Параметр | Предложение для MVP |
+| Setting | Proposed MVP value |
 |---|---|
-| Аренда попытки / heartbeat | 30 секунд / каждые 10 секунд |
-| Время ожидания в очереди | До 15 минут |
-| Выполнение попытки, включая подготовку | До 60 секунд |
-| Временные повторы | До 2 повторов, всего не более 3 попыток |
-| Исходники / тело запроса / PDF | 100 MiB / 1 MiB / 25 MiB |
-| Временные Git-объекты одной подготовки | До 250 MiB с прерыванием при превышении |
-| Совокупный срок обработки задачи | Очередь и все повторы должны уложиться в 15 минут с приёма |
+| Attempt lease / heartbeat | 30 seconds / every 10 seconds |
+| Queue wait | Up to 15 minutes |
+| Attempt including preparation | Up to 60 seconds |
+| Transient retries | At most 2 retries, 3 total attempts |
+| Source / request body / PDF | 100 MiB / 1 MiB / 25 MiB |
+| Temporary Git objects per preparation | Up to 250 MiB; interrupt on overflow |
+| Overall processing deadline | Queue and all retries within 15 minutes of admission |
 
-Все параметры конфигурируемые; пределы SaaS дополняют текущие ограничения движка. Ожидание не занимает компилятор. Повторяем только временные инфраструктурные ошибки. Ошибка Typst, лимит, неверный источник и пользовательская отмена не повторяются автоматически.
+All values are configurable. Queue wait consumes no compiler. Retry only transient infrastructure errors; do not automatically retry Typst errors, limits, invalid sources or user cancellation.
 
-Перед запуском контроллер повторно проверяет отложенную авторизацию, блокировку пространства и доступность резервов. Удалённое членство или отозванный ключ не дают отложенной задаче новые полномочия. Превышенный после понижения тарифа лимит не удаляет исходники; новые записи и задания ограничиваются до уменьшения использования или повышения тарифа.
+Before execution, recheck deferred authorization, workspace suspension and reservations. Revoked keys or removed memberships cannot authorize new deferred work. A downgrade does not delete sources; restrict new writes/jobs until usage falls or the plan increases.
 
-Каждая попытка имеет fencing token. Публикация в БД допустима только для текущей аренды и ожидаемого состояния, пока отмена не вступила в силу. Повторное исполнение возможно, но списание и публикация выполняются один раз для пользовательской задачи. Устаревшая попытка не может заменить результат новой.
+Every attempt has a fencing token. Publication requires the current lease, expected state and no effective cancellation. Execution may repeat, but user-job charging and publication happen once. Stale attempts cannot replace a newer result.
 
-PDF сначала записывается по приватному ключу `workspace/job/attempt`. Затем транзакция публикует ссылку, состояние, окончательное списание и событие аудита. Резервированный объём результата проверяется до публикации. Уборка удаляет объекты без опубликованной ссылки, просроченные закрепления Git и остатки рабочих папок.
+Write PDF bytes privately under `workspace/job/attempt`, then transactionally publish the reference, state, final charge and audit. Verify output reservation before publication. Cleanup removes unreferenced objects, expired Git pins and abandoned directories.
 
-Отмена queued-задачи сразу освобождает её резерв; истечение срока в очереди и отказ отложенной авторизации до подготовки также возвращают резерв. Отмена активной переводит её в `cancelling`; контроллер останавливает всю среду выполнения, дожидается завершения и очищает файлы, затем ставит `canceled`. Расчёт квоты зависит от того, началась ли подготовка, как описано в разделе 9. Гонка отмены и публикации разрешается одной транзакцией. Отмена терминальной задачи возвращает её текущее состояние без повторного действия.
+Cancelling queued work immediately refunds its reservation, as do queue expiry and failed authorization before preparation. Active work enters `cancelling`; stop its entire environment, wait for exit and clean files before marking `canceled`. Charging depends on whether preparation started, as described below. One transaction resolves cancellation versus publication. Cancelling a terminal job returns its state without repeating effects.
 
-Манифест фиксирует SHA, хеш JSON, entrypoint, формат, версии адаптера/шаблона, Typst, образа сборщика, пакетов и шрифтов. Произвольный документ может зависеть от времени и других разрешённых факторов; побайтовую идентичность всех PDF не обещаем. Для контролируемых шаблонов дата передаётся как вход, а зависимости закрепляются.
+The manifest records SHA, JSON hash, entry point, format, adapter/template/Typst/worker-image/package/font versions. Arbitrary documents may depend on time or other allowed inputs, so byte-identical PDFs are not universally promised. Controlled templates pass dates explicitly and pin dependencies.
 
-## 8. Граница исполнения и секреты
+## 8. Execution and secrets
 
-Доверенная часть: API, Git-подготовка, PostgreSQL, контроллер и хранилище результатов. Документ исполняется в отдельной среде задачи с её исходниками и JSON. Контроллер остаётся снаружи, продлевает аренду и читает результат после завершения.
+Trusted components are API, Git preparation, PostgreSQL, controller and artifact storage. The document runs in an isolated job environment with only its source and JSON; the controller remains outside, renews leases and reads output after termination.
 
-Для публичной версии предлагаем отдельный контейнер на задачу: непривилегированный пользователь, root filesystem read-only, ограниченный временный диск, 512 MiB памяти и один CPU как исходные пределы, запрет дополнительных capabilities, профиль системных вызовов и остановка всего контейнера по таймауту. В контейнер монтируется только нужная рабочая папка. Нет Docker socket, учётных данных БД, Git-токенов и глобального ключа API. Пакеты поступают из подготовленного кэша или ограниченного package-прокси; прямой произвольный исходящий доступ запрещён.
+The public-service proposal uses one container per job: unprivileged user, read-only root filesystem, bounded scratch disk, initial 512 MiB memory and one CPU, no added capabilities, syscall profile and whole-container timeout termination. Mount only the job directory. Exclude Docker socket, database credentials, Git tokens and global API key. Supply packages from a prepared cache or restricted proxy; arbitrary outbound access is disabled.
 
-Механизм запуска выбираем при реализации адаптера контроллера: для одного выделенного узла — локальный rootless runtime под доверенным контроллером, позднее — задачи оркестратора. Доступ к управлению runtime не передаётся компилятору. Текущий движок в одном rootless-контейнере годится как основа и для закрытого пилота; отдельную среду задачи и негативные тесты необходимо сделать перед публичным доступом.
+Choose the controller's execution adapter during implementation: a trusted controller with local rootless runtime on one dedicated host, then orchestrator jobs later. Compiler processes never receive runtime-management privileges. The earlier single rootless engine container is a starting point for a closed pilot; job isolation and negative tests precede public access.
 
-Git-прокси и импорт проверяют адрес, редиректы и фактическую сеть назначения. Внешним подключениям запрещены localhost, облачные metadata endpoints и внутренняя сеть; наша Gitea разрешена отдельно по точному серверному адресу. Нет произвольных настроек Git, hooks, фильтров и команд из пользовательского запроса. Размер проекта проверяется до компиляции, а дисковый предел — во время получения объектов.
+Git proxy/import validates addresses, redirects and actual destination networks. External connections reject localhost, cloud metadata endpoints and internal networks; allow hosted Gitea separately by an exact server-defined address. User requests cannot supply arbitrary Git settings, hooks, filters or commands. Check project size before compilation and enforce disk limits while fetching objects.
 
-Секреты подключений шифруются ключом вне БД; пароль и случайные ключи доступа хешируются. Операционные логи очищаются от секретов и содержимого документа. Диагностика Typst может содержать фрагмент исходника, поэтому хранится как отдельный приватный объект с ограниченным сроком и размером, а не в общем аудите.
+Encrypt connection secrets with a key outside the database; hash passwords and random access keys. Logs omit secrets and document content. Typst diagnostics may contain source fragments, so store them separately as bounded private data with retention, not in general audit.
 
-## 9. Тарифы, квоты и оплата
+## 9. Plans, quotas and payment
 
-Пример стартовой линейки; цены и экономику нужно подтвердить по измеренной стоимости сборки. Ни один тариф не означает бесконечные ресурсы.
+These starting plans require measured render costs before prices or economics are approved. No plan means unlimited resources.
 
-| Ограничение | Free | Pro | Team |
+| Limit | Free | Pro | Team |
 |---|---|---|---|
-| Участники | 1 | 1 | 10 |
-| Проекты, включая внешние | 10 | 50 | 200 |
-| Исходники managed Git, включая историю | 10 MiB | 100 MiB | 1 GiB |
-| Пользовательские задачи в месяц | 100 | 500 | 5 000 |
-| Активные задачи workspace | 1 | 2 | 4 |
-| Задачи в очереди workspace | 10 | 25 | 50 |
-| Приватные результаты | 50 MiB | 500 MiB | 5 GiB |
-| Срок PDF | 24 часа | 7 дней | 30 дней |
-| История задач и аудит | 30 дней | 90 дней | 365 дней |
-| Совместная работа | Личная | Личная | Участники, роли, Git-история |
+| Members | 1 | 1 | 10 |
+| Projects, including external | 10 | 50 | 200 |
+| Managed Git including history | 10 MiB | 100 MiB | 1 GiB |
+| User jobs/month | 100 | 500 | 5,000 |
+| Active workspace jobs | 1 | 2 | 4 |
+| Queued workspace jobs | 10 | 25 | 50 |
+| Private outputs | 50 MiB | 500 MiB | 5 GiB |
+| PDF retention | 24 hours | 7 days | 30 days |
+| Job history and audit | 30 days | 90 days | 365 days |
+| Collaboration | Personal | Personal | Members, roles, Git history |
 
-Для Company используем те же механизмы workspace с договорными настройками; SSO, выделенные сборщики и особые сроки хранения оцениваются отдельно. Внешнее физическое хранилище не оплачивается как managed Git, но остаются лимиты скачивания, служебных копий и вычислений.
+Company uses the same workspace mechanisms with negotiated settings; SSO, dedicated workers and special retention require separate estimates. External physical storage is not billed as managed Git, but download, service-copy and compute limits still apply.
 
-Сначала тарифы назначает администратор платформы. При подключении оплаты проверяем подпись webhook, уникальность события, допустимость перехода и сверяем состояние подписки у провайдера. Перенаправление браузера после оплаты не выдаёт тариф само по себе. Тариф действует как серверный набор разрешений; оплата и пользовательский API не имеют доступа к изменению произвольных лимитов.
+Administrators initially assign plans. A future payment adapter verifies webhook signature, event uniqueness and transition validity and reconciles subscription state with the provider. A browser payment redirect alone grants nothing. Plans are server entitlements; payment handlers and public APIs cannot arbitrarily alter limits.
 
-Квота задач резервируется при приёме. Повтор по Idempotency-Key и внутренние повторы не списываются снова. Пользовательская ошибка после начала подготовки расходует одну задачу. Отмена до начала подготовки и окончательный инфраструктурный отказ возвращают резерв. Дополнительно действуют лимиты частоты и общего объёма сети/диска, чтобы возврат резерва не давал бесконечные бесплатные попытки.
+Reserve jobs at admission. Idempotent requests and internal retries do not charge again. User errors after preparation starts consume one job. Cancellation before preparation and terminal infrastructure failure refund it. Rate and aggregate network/disk limits prevent refunds enabling unlimited free attempts.
 
-Хранение Git измеряется после сборки объектов и периодически сверяется; параллельные записи используют общий резерв. Хранение PDF контролируется до публикации. Заполненная квота результатов предлагает удалить старые PDF; удаление результата не удаляет исходники. Понижение тарифа сохраняет чтение и экспорт, ограничивая новые расходы.
+Measure Git storage after object creation and periodically reconcile it; concurrent writes share reservations. Check PDF usage before publication. Full output quota prompts deletion of older PDFs without deleting sources. Downgrades preserve reading/export while restricting new consumption.
 
-## 10. Аудит, диагностика и метрики
+## 10. Audit, diagnostics and metrics
 
-Аудит записывается вместе с изменением состояния приложения, а доставку во внешние системы при необходимости обеспечивает outbox. Пользователь не редактирует события. Owner/Admin видят аудит своего пространства; Editor/Viewer видят доступную историю проектов согласно роли. Администратор платформы использует отдельный привилегированный путь, который также фиксируется.
+Audit commits with application state; outbox supports reliable external delivery. Users cannot edit events. Owner/Admin see workspace audit; Editor/Viewer see authorized project history. Platform administrators use a separate audited privileged path.
 
-События: `account.login`, `membership.changed`, `api_key.created/revoked`, `project.created/imported`, `source.committed/conflict`, `render.accepted/canceled/succeeded/failed`, `quota.denied`, `plan.changed`, `artifact.downloaded/deleted`. Поля: UTC-время, request_id, workspace, actor, объект действия, SHA, outcome и error_code. Пароли, токены, JSON, исходники и PDF не входят в событие.
+Events include `account.login`, `membership.changed`, `api_key.created/revoked`, `project.created/imported`, `source.committed/conflict`, `render.accepted/canceled/succeeded/failed`, `quota.denied`, `plan.changed`, `artifact.downloaded/deleted`. Fields include UTC time, request ID, workspace, actor, object, SHA, outcome and error code. Exclude passwords, tokens, JSON, source and PDF bytes.
 
-Технические логи содержат процесс, фазу, длительность, error_code и разрешённые идентификаторы. Метрики: длина и возраст очереди, активные задачи, p50/p95 исполнения, доля ошибок, CPU/память, место на диске, задержка Git, успех публикации и стоимость ресурса на workspace. Метки с пользователями и каждым SHA в общих временных рядах не создаём.
+Technical logs contain process, phase, duration, error code and permitted IDs. Metrics include queue length/age, active jobs, p50/p95 duration, error ratio, CPU/memory, disk, Git latency, publication success and resource cost per workspace. Avoid per-user or per-SHA labels in general time series.
 
-Начальный просмотр технических логов через операторские средства достаточен для пилота. Поиск пользовательского аудита — функция приложения. Алерты нужны для отсутствия сборщиков, недоступной БД/Gitea, роста очереди, заполнения диска и ошибок изоляции; их пороги и получатели задаёт оператор при развёртывании.
+Operator log tools suffice for the pilot; searchable user audit is an application feature. Alert on missing workers, unavailable database/Gitea, growing queues, full disks and isolation failures. Operators configure thresholds and recipients at deployment.
 
-## 11. Развёртывание, рост и восстановление
+## 11. Deployment, growth and recovery
 
-Первый этап: один сервер с Compose для API, PostgreSQL, Gitea и приватного тома PDF; доверенный контроллер запускает среды задач на выделенном execution runtime. Gitea может сохранять текущую SQLite в одном экземпляре; PostgreSQL приложения — отдельная БД. Все постоянные данные имеют named volumes и резервное копирование. Сборка образов не запускает систему оплаты и не покупает новые серверы.
+Start with one Compose server for API, PostgreSQL, Gitea and private PDF volume; a trusted controller launches jobs on a dedicated execution runtime. One Gitea instance can retain SQLite; application PostgreSQL is separate. Persistent data uses named volumes and backups. Building images neither enables billing nor buys servers.
 
-Начальная глобальная ёмкость: два исполнения и до 50 queued-задач, пониженные пределы workspace. При переполнении API возвращает 429 вместо неограниченной очереди. Предел памяти одной задачи и глобальное число исполнений проверяются вместе с ресурсами узла.
+Initial global capacity is two concurrent executions and up to 50 queued jobs, with lower workspace limits. Reject overflow with 429. Validate per-job memory and global concurrency against host capacity.
 
-Рост: отдельный узел сборщиков → общие PDF/входы → несколько API → автоматическое количество сборщиков. Кэш остаётся локальным и удаляемым. Исходники всегда Git; объектное хранилище при нескольких узлах используется для результатов и приватных входных данных, а не заменяет Gitea.
+Growth sequence: separate worker host → shared PDF/input storage → multiple API instances → automatic worker count. Local caches stay disposable. Git remains the source store; object storage supports outputs and private inputs, rather than replacing Gitea in this historical design.
 
-Если выбран Kubernetes, [HPA](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/) увеличивает число исполнителей по метрикам очереди и ресурсов. [Node autoscaling](https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/) отдельно добавляет узлы, если размещение задач невозможно. Оператор задаёт минимум, максимум, задержку уменьшения, предел бюджета и поведение при исчерпании бюджета. Для демонстрации автоматическое приобретение инфраструктуры выключено.
+Kubernetes [HPA](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/) scales workers from queue/resource metrics; [node autoscaling](https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/) adds placement capacity. Operators define minimum, maximum, scale-down delay, budget and exhaustion behavior. Automatic infrastructure purchasing is disabled for demonstrations.
 
-Gitea и PostgreSQL имеют собственную стратегию ёмкости и отказоустойчивости. Не масштабируем Gitea с одной SQLite простым увеличением количества процессов. Общий Git-кэш на сетевом каталоге не заменяет синхронизацию репозитория и аренды.
+Gitea/PostgreSQL need independent capacity and availability strategies. Do not scale one SQLite-backed Gitea by adding processes. A shared network Git-cache directory does not replace synchronization and leases.
 
-Резервируем PostgreSQL приложения, Git-данные и конфигурацию Gitea, ключи расшифрования и серверную конфигурацию доступа. Предложение для пилота: ежедневная копия вне основного сервера, RPO до 24 часов и учебное восстановление с целью RTO до 4 часов. Это цели проверки, не обещанный SLA. Внешние репозитории принадлежат их владельцам; наш закреплённый снимок предназначен для задачи, а не для полного резервирования чужого Git.
+Back up application PostgreSQL, Git data, Gitea configuration, decryption keys and server access configuration. Pilot targets: daily off-server backups, RPO up to 24 hours and recovery drills targeting RTO up to four hours. These are verification goals, not an SLA. External repository owners retain responsibility for their repositories; a job pin is not a full external Git backup.
 
-После перезапуска контроллер возвращает просроченные аренды, проверяет опубликованные артефакты и возобновляет уборку. Отмена и завершённое списание не повторяются. Пользователь может экспортировать проект с Git-историей и скачать живые результаты. Удаление пространства требует явного подтверждения в продукте и запускает ограниченный по сроку процесс удаления исходников, ключей и артефактов согласно объявленной политике, включая жизненный цикл резервных копий.
+After restart, reclaim expired leases, verify published artifacts and resume cleanup without repeating cancellation or final charges. Users can export Git history and download live artifacts. Workspace deletion requires explicit product confirmation and bounded deletion of sources, keys and artifacts under the disclosed policy, including backup lifecycle.
 
-## 12. Проверяемые критерии
+## 12. Acceptance criteria
 
-| Сценарий | Критерий готовности |
+| Scenario | Criterion |
 |---|---|
-| Обычный пользователь | Зарегистрировался, создал шаблонный проект, сохранил и скачал PDF без работы с Git вручную |
-| Markdown | Ссылки, изображения, списки, таблицы и Unicode проходят выбранный набор примеров; неподдержанные конструкции объяснены |
-| Бот | Два одинаковых запроса по ключу дают одну задачу и одно списание |
-| Чужой workspace | Пользователь не читает проект, JSON, диагностику, PDF, ключ или журнал другого пространства |
-| Конфликт редактора | Два сохранения с одним base_commit сохраняют первое и явно возвращают конфликт второму |
-| Изменённый Git | Сборка фиксирует SHA; force-push не подменяет её версию, удалённая до закрепления версия даёт ошибку |
-| Нагрузка | Квоты не превышаются гонкой запросов; один workspace не захватывает все слоты |
-| Отмена и сбой | Процессы завершены, аренда восстановима, файлы убраны, результат устаревшей попытки не опубликован |
-| Тариф и оплата | Переигранный webhook не выдаёт повторные права и не списывает ресурс второй раз |
-| Восстановление | Чистый сервер восстанавливает аккаунты, проекты, доступы и Git-историю из резервной копии |
-| Масштабирование | Добавление сборщика ускоряет очередь, а число узлов и расходы не превышают настроенный предел |
+| Ordinary user | Register, create a template project, save and download PDF without manual Git |
+| Markdown | Chosen examples cover links, images, lists, tables and Unicode; unsupported constructs are explained |
+| Bot | Two identical keyed requests create one job and one charge |
+| Other workspace | No access to its projects, JSON, diagnostics, PDFs, keys or audit |
+| Editor conflict | Two saves with one base commit accept the first and explicitly reject the second |
+| Changed Git | SHA stays fixed; force-push cannot substitute it; unavailable unpinned revisions fail |
+| Load | Races cannot exceed quotas; one workspace cannot occupy all slots |
+| Cancellation/failure | Processes terminate, leases recover, files are removed and stale results never publish |
+| Plan/payment | Replayed webhooks cannot grant rights or charge twice |
+| Recovery | A clean host restores accounts, projects, access and Git history from backup |
+| Scaling | More workers reduce queue delay without exceeding node or spending limits |
 
-Первая вертикальная реализация описана в [roadmap-v1.md](roadmap-v1.md). До публичного запуска обязательны изоляция клиентов, сред исполнения, квоты и проверка восстановления. Командный редактор с одновременным вводом, запись во внешний Git, SSO и автоматическое резервирование серверов не входят в первый вертикальный сценарий.
+The first complete implementation path is in [roadmap-v1.md](roadmap-v1.md). Public launch requires tenant and execution isolation, quotas and a tested restore. Simultaneous editing, external Git writes, SSO and automatic server provisioning were outside this historical first path.

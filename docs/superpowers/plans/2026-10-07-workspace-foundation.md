@@ -1,45 +1,47 @@
 # Leafrun Workspace Foundation Implementation Plan
 
+> Historical document, retained from the upstream repository. Superseded by the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md) and [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md). Implementation claims refer to the dated historical revision, not this checkout.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Добавить отдельно проверяемый фундамент PostgreSQL: пространства, членство и метаданные проектов с запретом доступа к чужому workspace.
+**Goal:** Add an independently testable PostgreSQL foundation for workspaces, membership and project metadata, preventing access to another workspace.
 
-**Architecture:** Новая библиотека `internal/workspaces` принимает `database/sql` соединение с ограниченной ролью. Каждая операция использует транзакционный контекст пользователя и пространства; PostgreSQL RLS дополнительно ограничивает строки. Действующий renderer продолжает работать отдельно, пока следующие планы не добавят аутентификацию, Git-операции и публичные маршруты SaaS.
+**Architecture:** The new `internal/workspaces` library accepts a `database/sql` connection using a restricted role. Every operation uses a transaction-scoped user and workspace context; PostgreSQL RLS additionally restricts rows. The existing renderer stays separate until later plans add authentication, Git operations and public SaaS routes.
 
-**Tech Stack:** Go 1.27, `database/sql`, PostgreSQL 18; драйвер [pgx v5.7.6](https://github.com/jackc/pgx/releases/tag/v5.7.6) для интеграционных проверок. В ходе реализации проверить совместимость и доступные исправления зависимостей; версия здесь задаёт исходную воспроизводимую точку.
+**Tech Stack:** Go 1.27, `database/sql`, PostgreSQL 18; [pgx v5.7.6](https://github.com/jackc/pgx/releases/tag/v5.7.6) for integration checks. Verify compatibility and available dependency fixes during implementation; this version specifies the initial reproducible baseline.
 
 ---
 
-Это первый самостоятельный подраздел этапа 1 [roadmap](../../architecture/roadmap-v1.md), а не план всей платформы. Новый HTTP API и миграции аккаунтов, сессий, очереди, квот и аудита получат следующие планы. Метаданные проектов в этой проверке не создают репозиторий и не дают пользователю вход: библиотека пока не подключается к публичному серверу. Требования к RLS сверены с [официальной документацией PostgreSQL](https://www.postgresql.org/docs/current/ddl-rowsecurity.html).
+This is the first independent part of stage 1 in the [roadmap](../../architecture/roadmap-v1.md), not a plan for the entire platform. Later plans cover the HTTP API and migrations for accounts, sessions, queues, quotas and audit. Project metadata in this test neither creates a repository nor signs a user in: the library is not connected to the public server. RLS requirements were checked against the [official PostgreSQL documentation](https://www.postgresql.org/docs/current/ddl-rowsecurity.html).
 
-## Файлы и границы
+## Files and boundaries
 
-| Файл | Действие | Ответственность |
+| File | Action | Responsibility |
 |---|---|---|
-| `internal/workspaces/schema/001_foundation.sql` | Создать | Первая миграция, связи и RLS |
-| `internal/workspaces/store.go` | Создать | Проверка роли БД, транзакция доступа, чтение метаданных |
-| `internal/workspaces/store_integration_test.go` | Создать | Негативные проверки на настоящем PostgreSQL |
-| `go.mod`, `go.sum` | Обновить | Зафиксировать драйвер проверки |
+| `internal/workspaces/schema/001_foundation.sql` | Create | Initial migration, relationships and RLS |
+| `internal/workspaces/store.go` | Create | Database role checks, access transactions and metadata reads |
+| `internal/workspaces/store_integration_test.go` | Create | Negative tests against real PostgreSQL |
+| `go.mod`, `go.sum` | Update | Pin the test driver |
 
-Миграцию выполняет отдельная роль-владелец. `leafrun_app` не имеет superuser, BYPASSRLS, членства в других ролях, владения таблицами или CREATE в public. Контекст `userID` приходит от будущей проверенной сессии, а не из тела запроса. Никакие публичные маршруты не добавляются до появления аутентификации.
+A separate owner role runs migrations. `leafrun_app` has no superuser privilege, BYPASSRLS, membership in other roles, table ownership or CREATE in public. The future verified session supplies `userID`, not the request body. No public routes are added before authentication.
 
-## Task 1: Подготовить изолированный тест и зависимость
+## Task 1: Prepare an isolated test and dependency
 
-- [ ] Проверить существующий baseline:
+- [ ] Check the existing baseline:
 
 ```powershell
 go test ./...
 ```
 
-Ожидание: PASS текущего renderer. Эти проверки выполняются при реализации, а не считаются результатом данного документа.
+Expected: the existing renderer passes. Run these checks during implementation; they are not results established by this document.
 
-- [ ] Зафиксировать драйвер:
+- [ ] Pin the driver:
 
 ```powershell
 go get github.com/jackc/pgx/v5/stdlib@v5.7.6
 ```
 
-- [ ] Запустить только отдельный тестовый PostgreSQL:
+- [ ] Start only a separate test PostgreSQL instance:
 
 ```powershell
 docker run --name leafrun-foundation-test -d -p 127.0.0.1:55432:5432 -e POSTGRES_DB=leafrun_foundation_test -e POSTGRES_PASSWORD=leafrun-test-local postgres:18
@@ -48,11 +50,11 @@ $env:TEST_DATABASE_URL='postgres://postgres:leafrun-test-local@localhost:55432/l
 $env:TEST_APP_DATABASE_URL='postgres://leafrun_app:leafrun-test-local@localhost:55432/leafrun_foundation_test?sslmode=disable'
 ```
 
-Ожидание: `accepting connections`. При ещё не готовой БД повторить `pg_isready`; не выполнять миграции на production. Пароль здесь только для одноразовой локальной проверки.
+Expected: `accepting connections`. Retry `pg_isready` if necessary; do not run these migrations against production. This password is only for an ephemeral local test.
 
-## Task 2: Написать интеграционную проверку до реализации
+## Task 2: Write the integration test before implementation
 
-- [ ] Создать `internal/workspaces/store_integration_test.go` с полным содержимым:
+- [ ] Create `internal/workspaces/store_integration_test.go` with the complete contents:
 
 ```go
 //go:build integration
@@ -201,17 +203,17 @@ func TestWorkspaceFoundation(t *testing.T) {
 }
 ```
 
-- [ ] Запустить:
+- [ ] Run:
 
 ```powershell
 go test -tags=integration ./internal/workspaces -run TestWorkspaceFoundation -count=1 -v
 ```
 
-Ожидание до реализации: FAIL из-за отсутствия `New`, `ErrForbidden` и `ErrUnsafeRole`. Не заменять это mock-БД: проверка должна поймать ошибки настоящих RLS-политик и повторного использования соединения.
+Expected before implementation: failure because `New`, `ErrForbidden` and `ErrUnsafeRole` are absent. Do not replace PostgreSQL with a mock: the test must catch real RLS policy and connection-reuse errors.
 
-## Task 3: Создать миграцию
+## Task 3: Create the migration
 
-- [ ] Создать `internal/workspaces/schema/001_foundation.sql`:
+- [ ] Create `internal/workspaces/schema/001_foundation.sql`:
 
 ```sql
 CREATE TABLE users (
@@ -273,11 +275,11 @@ GRANT SELECT ON users,workspaces,memberships,projects TO leafrun_app;
 GRANT INSERT ON projects TO leafrun_app;
 ```
 
-Миграция применяется транзакционно. В рабочем развёртывании роль и её случайный пароль создаёт provisioning отдельно; тестовый пароль в миграцию не попадает. Для временного теста роль уже создала fixture из Task 2. Индекс запрещает второго Owner; создание пространства и передача владения следующим сервисным модулем должны гарантировать одного Owner на завершении транзакции. Публичное создание проекта появится только через Git/квоты и доверенный сервисный метод; наличие SQL-разрешения не создаёт HTTP-маршрут.
+Apply the migration transactionally. Production provisioning creates the role and its random password separately; the test password is not part of the migration. The Task 2 fixture already creates the temporary test role. The index prevents a second Owner; the subsequent workspace creation and ownership-transfer service must guarantee one Owner at transaction completion. Public project creation must pass through Git, quotas and a trusted service method; a SQL permission does not create an HTTP route.
 
-## Task 4: Реализовать транзакционный доступ
+## Task 4: Implement transactional access
 
-- [ ] Создать `internal/workspaces/store.go`:
+- [ ] Create `internal/workspaces/store.go`:
 
 ```go
 package workspaces
@@ -358,20 +360,20 @@ func (s *Store) ListProjects(ctx context.Context, userID, workspaceID string) ([
 }
 ```
 
-`set_config(..., true)` ограничен транзакцией. Не заменять его на настройку соединения вне транзакции: пул тогда может передать контекст следующему пользователю. Значения параметризованы, строки SQL не собираются из входа. RLS здесь дополнение к проверке личности и роли приложения, а не способ доверять произвольному `userID` клиента.
+`set_config(..., true)` is transaction-scoped. Do not replace it with a connection setting outside the transaction: the pool could leak the context to the next user. Values are parameterized; SQL is not assembled from input. RLS complements verified identity and the application role; it does not make arbitrary client-supplied `userID` values trustworthy.
 
-- [ ] Отформатировать и выполнить негативные проверки:
+- [ ] Format the code and run the negative tests:
 
 ```powershell
 gofmt -w internal/workspaces/store.go internal/workspaces/store_integration_test.go
 go test -tags=integration ./internal/workspaces -run TestWorkspaceFoundation -count=1 -v
 ```
 
-Ожидание: все восемь дочерних проверок PASS; второй Owner, чужая запись и запись Viewer отвергнуты; запрос без контекста видит 0 проектов; 20 параллельных операций не смешивают пространства; опасное членство роли БД запрещено.
+Expected: all eight subtests pass. A second Owner, a foreign write and a Viewer write are rejected; a query without context sees zero projects; 20 concurrent operations do not mix workspaces; unsafe database role membership is rejected.
 
-## Task 5: Проверить совместимость и зафиксировать результат
+## Task 5: Verify compatibility and record the result
 
-- [ ] Выполнить проверку кода и существующего движка:
+- [ ] Check the code and existing engine:
 
 ```powershell
 go vet ./...
@@ -379,18 +381,18 @@ go test ./...
 go test -race -tags=integration ./internal/workspaces -run TestWorkspaceFoundation -count=1
 ```
 
-Если локальный Go на Windows не поддерживает race из-за отсутствия C toolchain, выполнять последнюю команду в Linux CI с доступом к тестовой PostgreSQL. Не утверждать, что race прошёл, по результату обычного теста. Проверка foundation требует отдельной тестовой БД; `.env` рабочего renderer не используется.
+If local Go on Windows cannot run the race detector because a C toolchain is absent, run the last command in Linux CI with access to the test PostgreSQL instance. A normal test pass is not evidence of a race-detector pass. Foundation tests require a separate test database; do not use the renderer deployment `.env`.
 
-- [ ] После PASS записать проверенные версии Go/PostgreSQL/pgx и команды в отдельный отчёт реализации. В текущем плане проверки только предписаны.
+- [ ] After success, record the verified Go/PostgreSQL/pgx versions and commands in a separate implementation report. This plan prescribes checks but does not claim they have run.
 
-- [ ] Зафиксировать ограниченный набор файлов:
+- [ ] Commit only the scoped files:
 
 ```powershell
 git add go.mod go.sum internal/workspaces
 git commit -m "feat: add workspace schema and tenant transactions"
 ```
 
-- [ ] Убрать только созданный тестовый контейнер и временные переменные:
+- [ ] Remove only the test container and temporary environment variables created above:
 
 ```powershell
 docker rm -f leafrun-foundation-test
@@ -398,6 +400,6 @@ Remove-Item Env:TEST_DATABASE_URL -ErrorAction SilentlyContinue
 Remove-Item Env:TEST_APP_DATABASE_URL -ErrorAction SilentlyContinue
 ```
 
-## Следующая граница
+## Next boundary
 
-После этой библиотеки проектируем и реализуем регистрацию, подтверждение email, серверную сессию и создание личного пространства через ограниченный сервисный путь с аудитом. Затем managed-проект и редактор, потом очередь и отдельная среда сборки. Эти функции требуют самостоятельных планов и проверок; foundation не считается готовым пользовательским MVP.
+After this library, design and implement registration, email verification, server sessions and personal workspace creation through a restricted service path with audit. Follow with managed projects and the editor, then the queue and isolated rendering environments. These features require separate plans and checks; the foundation alone is not a user MVP.

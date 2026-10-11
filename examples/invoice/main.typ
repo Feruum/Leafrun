@@ -3,8 +3,8 @@
 #set text(font: "Libertinus Serif", size: 11pt)
 #image("assets/logo.svg", width: 12mm)
 
-= #data.at("title", default: "Счёт")
+= #data.at("title", default: "Invoice")
 
-Заказчик: #data.at("customer", default: "Пример компании")
+Customer: #data.at("customer", default: "Example Company")
 
 #include "sections/details.typ"

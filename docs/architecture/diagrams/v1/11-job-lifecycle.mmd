@@ -1,23 +1,23 @@
 flowchart LR
-    Queued[queued: резерв и SHA] --> Lease[Аренда и проверка прав]
-    Lease --> Preparing[preparing: исходники]
+    Queued[queued: reservation and SHA] --> Lease[Lease + auth]
+    Lease --> Preparing[preparing: sources]
     Preparing --> Rendering[rendering: Typst]
-    Rendering --> Publishing[publishing: PDF попытки]
-    Publishing --> Fence{Аренда актуальна? Отмены нет?}
-    Fence -->|Да| Success([succeeded])
-    Fence -->|Нет| Orphan[Удалить результат устаревшей попытки]
-    Preparing -. Временный сбой .-> Retry{Есть попытки и время?}
-    Rendering -. Временный сбой .-> Retry
-    Publishing -. Временный сбой .-> Retry
-    Retry -->|Да: задержка| Queued
-    Retry -->|Нет| Failed([failed])
-    Rendering -->|Ошибка Typst или лимит| Failed
-    Preparing -->|Неверный источник или лимит| Failed
-    Queued -->|Истёк общий срок| Expired([expired])
-    Queued -->|Отмена: вернуть резерв| Cancelled([canceled])
-    Rendering -->|Отмена| Cancelling[cancelling: остановить и убрать]
-    Preparing -->|Отмена| Cancelling
-    Publishing -->|Отмена выиграла транзакцию| Cancelling
+    Rendering --> Publishing[publishing: attempt PDF]
+    Publishing --> Fence{Current lease?}
+    Fence -->|Yes| Success([succeeded])
+    Fence -->|No| Orphan[Delete stale PDF]
+    Preparing -. Transient failure .-> Retry{Retry budget?}
+    Rendering -. Transient failure .-> Retry
+    Publishing -. Transient failure .-> Retry
+    Retry -->|Yes: delay| Queued
+    Retry -->|No| Failed([failed])
+    Rendering -->|Typst error or limit| Failed
+    Preparing -->|Invalid source or limit| Failed
+    Queued -->|Overall deadline exceeded| Expired([expired])
+    Queued -->|Cancel + refund| Cancelled([canceled])
+    Rendering -->|Cancel| Cancelling[cancelling: stop and clean up]
+    Preparing -->|Cancel| Cancelling
+    Publishing -->|Cancellation won the transaction| Cancelling
     Cancelling --> Cancelled
     classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
     classDef decision fill:#9CE6FF,stroke:#2C97BB,color:#1C4657

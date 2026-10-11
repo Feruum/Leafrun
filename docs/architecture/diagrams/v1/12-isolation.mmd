@@ -1,20 +1,20 @@
 flowchart TB
-    Identity[Сессия или scoped API-ключ] --> API[API: текущие права и workspace]
-    API --> DB[PostgreSQL: tenant-связи, RLS, очередь]
-    API --> Connections[Подключения workspace, encrypted credentials]
-    Connections --> Prep[Git: адреса, диск, SHA]
-    DB --> Controller[Доверенный контроллер: lease и лимиты]
-    Prep --> Source[Только исходники одной задачи]
-    subgraph Sandbox[Отдельная среда исполнения задачи]
-        Input[SHA checkout и приватный JSON] --> Typst[Typst: non-root, read-only root]
-        Packages[Закреплённые пакеты и шрифты] --> Typst
-        Typst --> Output[PDF и ограниченная диагностика]
+    Identity[Session or scoped API key] --> API[API: current rights and workspace]
+    API --> DB[PostgreSQL: RLS + queue]
+    API --> Connections[Scoped connections]
+    Connections --> Prep[Git: addresses, disk, SHA]
+    DB --> Controller[Controller: leases + limits]
+    Prep --> Source[Sources for one job only]
+    subgraph Sandbox[Isolated job execution environment]
+        Input[SHA checkout and private JSON] --> Typst[Typst: isolated process]
+        Packages[Pinned packages and fonts] --> Typst
+        Typst --> Output[PDF and bounded diagnostics]
     end
     Source --> Input
-    Controller -->|Запустить и остановить| Typst
+    Controller -->|Start and stop| Typst
     Output --> Controller
-    Controller --> Artifacts[Приватное хранилище workspace / job]
-    Artifacts --> Download[Скачать только после проверки прав]
+    Controller --> Artifacts[Private job storage]
+    Artifacts --> Download[Authorized download]
     API --> Download
     classDef component fill:#FFE86D,stroke:#A28E26,color:#574900
     class Identity,API,DB,Connections,Prep,Controller,Source,Input,Typst,Packages,Output,Artifacts,Download component
