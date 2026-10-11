@@ -1,42 +1,10 @@
-<p align="center">
-  <img src="docs/assets/leafrun-logo.png" width="112" height="112" alt="Leafrun logo">
-</p>
+# Leafrun generation
 
-<h1 align="center">Leafrun</h1>
-
-<p align="center">
-  <strong>Typst projects in. PDFs out.</strong><br>
-  A tiny Go package for rendering local document projects.
-</p>
-
-<p align="center">
-  <img src="docs/assets/runtime-badges.svg" width="232" height="24" alt="Go 1.27 or later · Typst CLI 0.15.1">
-</p>
-
-<p align="center">
-  <a href="#quick-start">Quick start</a> &nbsp;·&nbsp;
-  <a href="#use-from-go">Go API</a> &nbsp;·&nbsp;
-  <a href="#prepare-a-document-project">Project files</a> &nbsp;·&nbsp;
-  <a href="#development">Contributing</a>
-</p>
-
-Give Leafrun a folder containing `main.typ`. It runs the [Typst](https://typst.app/) CLI, writes `document.pdf`, and returns the absolute output path:
-
-```go
-pdf, err := leafrun.Render("./project")
-```
-
-Use it for invoices, reports, letters, and other documents with local JSON data and assets. Typst handles the typesetting; your application prepares the files and delivers the PDF.
-
-## Repository status
-
-This repository is the generation component of [Leafrun](https://github.com/leafrun/leafrun), forked from [Feruum/Leafrun](https://github.com/Feruum/Leafrun) with its history preserved. It currently contains the local rendering prototype described here. Server jobs, Temporal workflows, diagnostics services and caching remain planned; see the [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md).
-
-The existing Go module path and `Render(repoPath)` API remain unchanged. The `go get` command below therefore resolves the original module; clone this fork to work on its current files. Extraction into the shared `leafrun-document-core` is future roadmap work.
+Render a local Typst project from Go. This working prototype is a [fork of Feruum/Leafrun](https://github.com/Feruum/Leafrun); its Git history is preserved.
 
 ## Quick start
 
-With Go and Typst installed, clone Leafrun and render the included invoice. See [requirements](#requirements) for installation details.
+Install [Go 1.27](https://go.dev/dl/) and [Typst 0.15.1](https://github.com/typst/typst/releases/tag/v0.15.1), with `typst` on your `PATH`. Then run the included invoice:
 
 ```sh
 git clone https://github.com/leafrun/leafrun-generation.git
@@ -44,248 +12,35 @@ cd leafrun-generation
 go run ./examples/render ./examples/invoice
 ```
 
-The command prints the absolute path to `examples/invoice/document.pdf`. Open that file in a PDF viewer.
-
-The example uses JSON data, an SVG image, and an included Typst file. Edit [examples/invoice/data.json](examples/invoice/data.json) and run the same command again to regenerate the invoice. The example uses English text; you can change its text and data in the project files.
-
-To render another local project from this checkout:
-
-```sh
-go run ./examples/render "/absolute/path/to/document-project"
-```
-
-Relative paths also work. Quote paths containing spaces. The example command accepts exactly one directory argument, prints the output path on success, and exits with an error if compilation fails.
+The command prints the absolute path to `examples/invoice/document.pdf`. Change [the invoice data](examples/invoice/data.json) and run it again to replace the PDF. A project needs `main.typ` and any files it references; the example also includes JSON, an SVG, and another Typst file.
 
 ## Use from Go
 
-In your own Go module, add the package:
-
-```sh
-go get github.com/Feruum/Leafrun@latest
-```
-
-Then call `Render`:
-
 ```go
-package main
+import leafrun "github.com/Feruum/Leafrun"
 
-import (
-	"fmt"
-	"log"
-
-	"github.com/Feruum/Leafrun"
-)
-
-func main() {
-	pdf, err := leafrun.Render("./project")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(pdf)
-}
+pdf, err := leafrun.Render("./project")
 ```
 
-### Function contract
+`Render` accepts a local folder and returns the absolute path to `<project>/document.pdf` or a Typst error. It waits for compilation to finish. An existing output is overwritten after a successful render. See the [rendering reference](docs/rendering-reference.md) for file paths, fonts, packages, errors, and limits.
 
-The public API is one function:
-
-```go
-func Render(repoPath string) (string, error)
-```
-
-| Item | Behavior |
-|---|---|
-| Input | A local directory path, absolute or relative to the calling process's working directory |
-| Entry point | `<project>/main.typ` |
-| Output | `<project>/document.pdf`; an existing output is overwritten on a successful render |
-| Success | Absolute PDF path and `nil` error |
-| Failure | Empty path and an error; Typst command failures include captured diagnostics |
-| Execution | Synchronous: the call waits for the Typst process to finish |
-
-The function resolves the project path, sets it as both the process working directory and Typst project root, and executes the equivalent of:
-
-```sh
-typst compile --root <project> <project>/main.typ <project>/document.pdf
-```
-
-Arguments are passed directly to `os/exec`, without a shell. The implementation is in [render.go](render.go).
+The Go module is still `github.com/Feruum/Leafrun`. `go get github.com/Feruum/Leafrun@latest` fetches the **original upstream module**, not changes made only in this fork. Clone this repository when working on the Leafrun version. Changing the module path is separate future work.
 
 ## Requirements
 
-| Dependency | Requirement |
-|---|---|
-| Go | 1.27 or later, as declared in [go.mod](go.mod) |
-| Typst CLI | Installed and available as `typst` in `PATH`; verified with 0.15.1 |
-| Project directory | Readable local files, a `main.typ` entry point, and permission to write `document.pdf` |
-
-Leafrun has no third-party Go dependencies. Git is only needed to clone this repository or to prepare a Git-backed document project; rendering itself does not require a `.git` directory.
-
-Install Go from [go.dev](https://go.dev/dl/). Install Typst using its [official installation instructions](https://typst.app/open-source/#install-the-compiler), or download a binary for your system from the [0.15.1 release](https://github.com/typst/typst/releases/tag/v0.15.1) and add its directory to `PATH`.
-
-Verify the tools before running Leafrun:
-
-```sh
-go version
-typst --version
-```
+Go 1.27 and a `typst` command on `PATH` are required. The wrapper has no third-party Go dependencies. It does not download a project or run a server. To render a Git project today, first check it out into a local folder. See [requirements and limitations](docs/rendering-reference.md#requirements).
 
 ## Prepare a document project
 
-A minimal project needs one file:
-
-```text
-project/
-└── main.typ
-```
-
-Put this in `main.typ`:
-
-```typst
-= Hello, Leafrun
-
-This PDF was generated from a local Typst project.
-```
-
-For a document with data and images, a project can look like this:
-
-```text
-project/
-├── main.typ
-├── data.json
-├── assets/
-│   └── logo.svg
-└── sections/
-    └── details.typ
-```
-
-Typst files read these resources directly. For example:
-
-```typst
-#let data = json("/data.json")
-= #data.title
-#image("/assets/logo.svg", width: 12mm)
-#include "sections/details.typ"
-```
-
-Here, paths starting with `/` refer to the project root passed to Typst. Relative resource paths are resolved by Typst relative to the file that uses them.
-
-Leafrun takes no JSON argument and creates no data files. Your application writes or updates `data.json` before calling `Render`. If the source lives in Git, clone or check out the desired revision before calling the function.
-
-### Fonts and packages
-
-Typst handles fonts and package imports. Leafrun inherits the calling process's environment. To use project-specific font files, set Typst's `TYPST_FONT_PATHS` to an absolute directory path before running your application:
-
-```sh
-# Linux / macOS
-export TYPST_FONT_PATHS="/absolute/path/to/project/fonts"
-```
-
-```powershell
-# Windows PowerShell
-$env:TYPST_FONT_PATHS = 'C:\path\to\project\fonts'
-```
-
-Putting a `fonts/` folder in a project does not make Leafrun configure it automatically. For multiple font directories, Typst uses the system path separator: `:` on Linux/macOS and `;` on Windows.
-
-Typst can download imported registry packages into its own package cache, so the first render of a project using packages may need internet access. This cache belongs to Typst; Leafrun does not maintain a project or PDF cache. See [Typst's package documentation](https://github.com/typst/packages).
-
-## Current scope and limitations
-
-The current package deliberately exposes only local compilation:
-
-- The entry point is always `main.typ`, and the output is always `document.pdf` in the same project directory.
-- Each call compiles a new PDF. The caller owns the source files and the output file, including any cleanup.
-- Calls targeting the same project directory share one output path. Serialize them or prepare a separate directory for each job. Leafrun provides no locks or project snapshots.
-- There is no context parameter, cancellation mechanism, timeout, concurrency limit, or resource limit in the wrapper. It relies on the Typst process to finish.
-- HTTP endpoints, Git downloads, credentials, queues, accounts, collaboration, billing, and automatic scaling are outside the current implementation.
-- Sources must use Typst syntax. Markdown requires a separate conversion step or a compatible template/package.
-
-Typst supplies its own file-access rules through the project root. Leafrun adds no container or operating-system isolation. If you build a public service around it, handling user access, preparing isolated working directories, and enforcing resource limits belong to that service.
-
-## Troubleshooting
-
-| Symptom | What to check |
-|---|---|
-| `typst` cannot be found | Run `typst --version` in the same environment as the Go program and add the CLI directory to `PATH` |
-| `main.typ` cannot be read | Pass the project directory, rather than a file path or a remote Git URL, and check that `main.typ` exists |
-| Image, JSON, or include is missing | Check the resource path and keep the required files inside the Typst project root |
-| A font is unavailable | Install it or set an absolute `TYPST_FONT_PATHS` before starting the program |
-| A package cannot be downloaded | Check internet access and the package name/version reported by Typst |
-| The output cannot be written | Check directory permissions and whether a PDF viewer has locked `document.pdf` |
-| Rendering returns an error but a PDF is present | Use the returned error; an older output file may still exist and is not evidence of a successful new render |
-
-Typst syntax errors are returned with the CLI's diagnostic output. Read that error to locate the failing file and line.
+Put a `main.typ` in a folder and pass the folder path to `Render` or `examples/render`. Additional Typst files, data, and images can live under the same folder. See [file examples](docs/rendering-reference.md#prepare-a-document-project).
 
 ## Development
-
-With Go and Typst installed:
 
 ```sh
 go test ./... -count=1 -v
 go vet ./...
-go run ./examples/render ./examples/invoice
 ```
 
-The tests execute the real Typst CLI and verify a PDF built from local JSON, an image, and an included file; a relative project path containing spaces; compiler diagnostics; and a missing entry point. **They skip when Typst is not in `PATH`**, so make sure the test output shows a pass rather than a skip.
+The tests call the real Typst CLI and can skip if it is missing, so check the test output. For a rendering bug, include a small project and your Go and Typst versions in a [GitHub issue](https://github.com/leafrun/leafrun-generation/issues).
 
-The current implementation has been checked on Windows with Go 1.27.0 and Typst 0.15.1. Go uses portable standard-library APIs, but this repository does not claim a verified operating-system matrix.
-
-For an existing Windows checkout that already has the downloaded CLI under `.tools`, add it to the current PowerShell session:
-
-```powershell
-$env:PATH = (Resolve-Path '.tools/typst-v0.15.1/typst-x86_64-pc-windows-msvc').Path + [IO.Path]::PathSeparator + $env:PATH
-```
-
-The `.tools` directory is local and ignored by Git; it is not supplied by a fresh clone.
-
-### Repository layout
-
-```text
-render.go                    Public Render function
-render_test.go               Tests using the real Typst CLI
-examples/render/main.go      Command-line example
-examples/invoice/            Example document, data, and assets
-docs/assets/                 Leafrun logo and its generation prompt
-docs/architecture/           Platform design and diagrams
-docs/superpowers/            Earlier implementation plans and verification records
-```
-
-The [Leafrun logo](docs/assets/leafrun-logo.png) is a transparent PNG created with imagegen. Its [generation prompts](docs/assets/leafrun-logo.prompt.md) are saved alongside the asset. The runtime badges are local SVGs, so the header needs no external image service.
-
-Questions and contributions can be discussed through [GitHub issues](https://github.com/leafrun/leafrun-generation/issues) and pull requests. Include a minimal document project and the Go/Typst versions when reporting a rendering problem. Keep changes consistent with the small public API; discuss larger additions before implementation.
-
-## Design and project history
-
-The repository was simplified to this local function on **October 9, 2026**. The previous synchronous HTTP renderer, Git cache, Gitea integration, and Docker/Compose setup remain in Git history at [commit d77d9a9](https://github.com/Feruum/Leafrun/tree/d77d9a9bf53f64371820a6b1b84e693a3dcd6486).
-
-The following English documents preserve earlier design decisions. They are historical and superseded by the [current Leafrun architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md):
-
-- [Architecture and product design](docs/architecture/leafrun-saas-v1.md)
-- [Diagram index and current local rendering flow](docs/architecture/board-index.md)
-- [Development roadmap](docs/architecture/roadmap-v1.md)
-- [Miro board](https://miro.com/app/board/uXjVEd6scg8=/?moveToWidget=3458764686553812306)
-
-They describe a possible platform around the rendering core. Historical readiness checklists refer to the earlier server implementation; the current checkout contains the local function described above.
-
-## Planned generation service
-
-Generation will own jobs, admission, hard render quotas, watch debounce, diagnostics and the render cache index in `generation_db`. Its API, Render/Batch workflow workers, interactive/batch render activities and helper activities will scale independently. These services are not implemented by the local wrapper.
-
-Shared dependencies are [contracts](https://github.com/leafrun/leafrun-contracts), [platform packages](https://github.com/leafrun/leafrun-platform) and the future [document core](https://github.com/leafrun/leafrun-document-core). Runtime contracts connect Generation to [Storage](https://github.com/leafrun/leafrun-storage), [Collaboration](https://github.com/leafrun/leafrun-collaboration) and [Projects](https://github.com/leafrun/leafrun-projects).
-
-Related Linear epics (workspace access may be required):
-
-- [LEA-5](https://linear.app/bulnik/issue/LEA-5/e01-minimalnoe-yadro-rendera) — M01
-- [LEA-25](https://linear.app/bulnik/issue/LEA-25/e04-nadyozhnyj-asinhronnyj-servernyj-render) — M04
-- [LEA-33](https://linear.app/bulnik/issue/LEA-33/e05-kontrakt-proekta-parametry-i-relizy) — M05
-- [LEA-50](https://linear.app/bulnik/issue/LEA-50/e07-komplekty-massovaya-generaciya-i-dostavka) — M07
-- [LEA-82](https://linear.app/bulnik/issue/LEA-82/e11-live-collaboration-i-vladelec-proekta) — M11
-- [LEA-114](https://linear.app/bulnik/issue/LEA-114/e15-keshirovanie-ekspluataciya-i-masshtabirovanie) — M15
-
-The initial core prototype stays here while the shared library extraction remains planned. Repository setup does not complete these implementation issues.
-
-## License status
-
-A license has not been selected yet, and no `LICENSE` file has been added. The repository does not currently declare MIT, Apache-2.0, or another distribution license.
-
-Typst is a separate dependency with its own [license](https://github.com/typst/typst/blob/main/LICENSE).
+Server jobs, PDF storage, access control, and collaboration are planned elsewhere in [Leafrun](https://github.com/leafrun/leafrun). Follow its [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md) or [contribution guide](https://github.com/leafrun/leafrun/blob/main/CONTRIBUTING.md). No project license has been selected yet; this public fork does not declare an open-source license.
