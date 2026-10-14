@@ -1,7 +1,7 @@
 {
   "core": {
     "repository": "Feruum/leafrun-document-core",
-    "ref": "0949e14a00a9e86f31e8c3760c34d3cedc83cbd3"
+    "ref": "eb73180c1dd1fb5cb15b2e83097f5ca12764763c"
   },
   "contracts": {
     "repository": "Feruum/leafrun-contracts",
