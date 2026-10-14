@@ -1,23 +1,29 @@
 package leafrun
 
 import (
-	"fmt"
-	"os/exec"
+	"context"
 	"path/filepath"
+
+	documentcore "github.com/leafrun/leafrun-document-core"
 )
 
 // Render compiles main.typ in a local project and returns its document.pdf path.
-// Typst CLI must be available in PATH. An existing document.pdf is overwritten.
+// Typst CLI 0.15.1 must be available in PATH. A successful render atomically
+// replaces document.pdf; failures preserve the previous output.
 func Render(repoPath string) (string, error) {
 	root, err := filepath.Abs(repoPath)
 	if err != nil {
 		return "", err
 	}
-	pdf := filepath.Join(root, "document.pdf")
-	cmd := exec.Command("typst", "compile", "--root", root, filepath.Join(root, "main.typ"), pdf)
-	cmd.Dir = root
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("typst render: %w\n%s", err, output)
+	_, err = documentcore.Render(context.Background(), documentcore.RenderOptions{
+		ProjectDir: root,
+		Entrypoint: "main.typ",
+		Output:     "document.pdf",
+	})
+	if err != nil {
+		return "", err
 	}
-	return pdf, nil
+	// Preserve the legacy path spelling even when the core resolves a project
+	// alias to its canonical directory.
+	return filepath.Join(root, "document.pdf"), nil
 }

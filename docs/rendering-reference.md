@@ -1,10 +1,8 @@
 # Rendering reference
 
-This page documents the current local Go wrapper. The short [README](../README.md) is the place to start.
+The compatibility wrapper delegates to [Leafrun document core v0.1.0](https://github.com/leafrun/leafrun-document-core). Start with [the README](../README.md).
 
 ## Function contract
-
-The public API is one function:
 
 ```go
 func Render(repoPath string) (string, error)
@@ -12,70 +10,37 @@ func Render(repoPath string) (string, error)
 
 | Item | Behavior |
 |---|---|
-| Input | A local directory path, absolute or relative to the calling process's working directory |
-| Entry point | `<project>/main.typ` |
-| Output | `<project>/document.pdf`; an existing output is overwritten on a successful render |
-| Success | Absolute PDF path and `nil` error |
-| Failure | Empty path and an error; Typst command failures include captured diagnostics |
-| Execution | Synchronous: the call waits for the Typst process to finish |
+| Project | Local directory, absolute or relative to the caller's working directory |
+| Entrypoint | `<project>/main.typ` |
+| Output | `<project>/document.pdf`, explicitly selected by the wrapper |
+| Success | Absolute PDF path and a nil error |
+| Failure | Empty path and an error; any previous PDF remains intact |
+| Execution | Synchronous; waits for the engine and publication |
 
-The function resolves the project path, sets it as both the process working directory and Typst project root, and executes the equivalent of:
-
-```sh
-typst compile --root <project> <project>/main.typ <project>/document.pdf
-```
-
-Arguments are passed directly to `os/exec`, without a shell. The implementation is in [render.go](../render.go).
+The wrapper uses `context.Background()`. For cancellation, custom paths, extra font directories, or structured diagnostics, use the core's `Render(ctx, RenderOptions)` directly. The module path remains `github.com/Feruum/Leafrun`; it has not been migrated.
 
 ## Requirements
 
-| Dependency | Requirement |
-|---|---|
-| Go | 1.27 or later, as declared in [go.mod](../go.mod) |
-| Typst CLI | Installed and available as `typst` in `PATH`; verified with 0.15.1 |
-| Project directory | Readable local files, a `main.typ` entry point, and permission to write `document.pdf` |
-
-Leafrun has no third-party Go dependencies. Git is only needed to clone this repository or to prepare a Git-backed document project; rendering itself does not require a `.git` directory.
-
-Install Go from [go.dev](https://go.dev/dl/). Install Typst using its [official installation instructions](https://typst.app/open-source/#install-the-compiler), or download a binary for your system from the [0.15.1 release](https://github.com/typst/typst/releases/tag/v0.15.1) and add its directory to `PATH`.
-
-Verify the tools before running Leafrun:
+Go 1.27.0 and the exact Typst CLI version **0.15.1** are required. Install the appropriate [official release archive](https://github.com/typst/typst/releases/tag/v0.15.1), extract it, and put the binary's directory on `PATH`. The core rejects other versions before compiling.
 
 ```sh
 go version
 typst --version
+go mod download
 ```
+
+Rendering requires readable project files and a writable output directory. No Git directory or remote service is needed. The Go dependency is pinned in [go.mod](../go.mod).
 
 ## Prepare a document project
-
-A minimal project needs one file:
-
-```text
-project/
-└── main.typ
-```
-
-Put this in `main.typ`:
-
-```typst
-= Hello, Leafrun
-
-This PDF was generated from a local Typst project.
-```
-
-For a document with data and images, a project can look like this:
 
 ```text
 project/
 ├── main.typ
 ├── data.json
-├── assets/
-│   └── logo.svg
-└── sections/
-    └── details.typ
+├── assets/logo.svg
+├── sections/details.typ
+└── fonts/FiraSans-Regular.ttf
 ```
-
-Typst files read these resources directly. For example:
 
 ```typst
 #let data = json("/data.json")
@@ -84,53 +49,53 @@ Typst files read these resources directly. For example:
 #include "sections/details.typ"
 ```
 
-Here, paths starting with `/` refer to the project root passed to Typst. Relative resource paths are resolved by Typst relative to the file that uses them.
+Typst paths starting with `/` refer to the explicit project root. Relative imports and resources resolve from the file using them. The caller writes data files before rendering; the wrapper takes no separate JSON input.
 
-Leafrun takes no JSON argument and creates no data files. Your application writes or updates `data.json` before calling `Render`. If the source lives in Git, clone or check out the desired revision before calling the function.
+Project entrypoints and symlinks/junctions must stay within the project. The core checks links before starting the engine, and Typst's root rules reject source traversal such as `../secret.txt`. M01 assumes sources and links do not change during compilation.
 
 ### Fonts and packages
 
-Typst handles fonts and package imports. Leafrun inherits the calling process's environment. To use project-specific font files, set Typst's `TYPST_FONT_PATHS` to an absolute directory path before running your application:
+`<project>/fonts` is automatically added when present. To add other font directories, use the core API's `FontPaths` or repeat the core CLI's `--font-path`. Font-directory links must stay within their allowed directory.
 
-```sh
-# Linux / macOS
-export TYPST_FONT_PATHS="/absolute/path/to/project/fonts"
+The core ignores inherited `TYPST_FONT_PATHS`. Move custom fonts supplied through that variable to the project font directory or explicit options. Typst's embedded and system fonts are unaffected.
+
+Typst still provides embedded and system fonts and its package-import behavior. Registry packages may require a first download into Typst's package cache. The included invoice uses local resources and needs no package download. See [Typst packages](https://github.com/typst/packages).
+
+## Diagnostics and output integrity
+
+Warnings can accompany a successful PDF. Syntax errors, unknown names, missing resources, `assert`, and `panic` are ordinary compilation failures. Typst's full human diagnostics remain in the returned error text.
+
+The core wraps failures in `*documentcore.RenderError` and preserves the original cause:
+
+```go
+var exitError *exec.ExitError
+if errors.As(err, &exitError) {
+    // The original Typst process failure is available.
+}
 ```
 
-```powershell
-# Windows PowerShell
-$env:TYPST_FONT_PATHS = 'C:\path\to\project\fonts'
-```
+The core result also exposes normalized severity, message, hints, ordered trace, and nullable source positions. It preserves emitted paths/line/column and raw text without inventing ranges or offsets.
 
-Putting a `fonts/` folder in a project does not make Leafrun configure it automatically. For multiple font directories, Typst uses the system path separator: `:` on Linux/macOS and `;` on Windows.
+Compilation uses a unique temporary file beside the output. Only a completed, validated PDF is atomically published; Windows has a separate replacement implementation. Failure, cancellation, or a locked destination preserves the previous PDF. A PDF already on disk is not evidence that the latest render succeeded: use the returned error.
 
-Typst can download imported registry packages into its own package cache, so the first render of a project using packages may need internet access. This cache belongs to Typst; Leafrun does not maintain a project or PDF cache. See [Typst's package documentation](https://github.com/typst/packages).
+## Scope and limits
 
-## Current scope and limitations
+The wrapper retains its fixed entrypoint/output and has no context parameter. Concurrent callers using the same directory target the same `document.pdf`; serialize those calls or use the core with distinct outputs. Neither package snapshots a mutable source tree.
 
-The current package deliberately exposes only local compilation:
-
-- The entry point is always `main.typ`, and the output is always `document.pdf` in the same project directory.
-- Each call compiles a new PDF. The caller owns the source files and the output file, including any cleanup.
-- Calls targeting the same project directory share one output path. Serialize them or prepare a separate directory for each job. Leafrun provides no locks or project snapshots.
-- There is no context parameter, cancellation mechanism, timeout, concurrency limit, or resource limit in the wrapper. It relies on the Typst process to finish.
-- HTTP endpoints, Git downloads, credentials, queues, accounts, collaboration, billing, and automatic scaling are outside the current implementation.
-- Sources must use Typst syntax. Markdown requires a separate conversion step or a compatible template/package.
-
-Typst supplies its own file-access rules through the project root. Leafrun adds no container or operating-system isolation. If you build a public service around it, handling user access, preparing isolated working directories, and enforcing resource limits belong to that service.
+Successful compilation does not judge layout or content quality. An oversized page element can compile successfully; the user reviews the resulting document. HTTP endpoints, Git downloads, jobs, storage, access control, resource limits, and WASM are later stages.
 
 ## Troubleshooting
 
-| Symptom | What to check |
+| Symptom | Check |
 |---|---|
-| `typst` cannot be found | Run `typst --version` in the same environment as the Go program and add the CLI directory to `PATH` |
-| `main.typ` cannot be read | Pass the project directory, rather than a file path or a remote Git URL, and check that `main.typ` exists |
-| Image, JSON, or include is missing | Check the resource path and keep the required files inside the Typst project root |
-| A font is unavailable | Install it or set an absolute `TYPST_FONT_PATHS` before starting the program |
-| A package cannot be downloaded | Check internet access and the package name/version reported by Typst |
-| The output cannot be written | Check directory permissions and whether a PDF viewer has locked `document.pdf` |
-| Rendering returns an error but a PDF is present | Use the returned error; an older output file may still exist and is not evidence of a successful new render |
+| Typst cannot be found or has the wrong version | Run `typst --version` in the same environment as the Go program; install 0.15.1 |
+| `main.typ` is missing | Pass a local project directory containing that file |
+| Import, image, or data file is missing | Check its path and keep local resources under the project root |
+| Font warning | Put the font under `<project>/fonts` or supply a core font path |
+| Package cannot be downloaded | Check the package name/version and network access |
+| Output cannot be published | Check directory permissions and PDF-viewer locks |
+| Error but an existing PDF remains | The old PDF is deliberately preserved; fix the diagnostic and render again |
 
-Typst syntax errors are returned with the CLI's diagnostic output. Read that error to locate the failing file and line.
+[Verification record](verification.md) documents the wrapper and core checks.
 
 

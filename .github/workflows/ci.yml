@@ -1,0 +1,79 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read pinned draft dependencies
+        id: dependencies
+        run: |
+          $pins = Get-Content -Raw ci/dependencies.json | ConvertFrom-Json
+          "json=$($pins | ConvertTo-Json -Depth 5 -Compress)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Check out Core
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(steps.dependencies.outputs.json).core.repository }}
+          ref: ${{ fromJSON(steps.dependencies.outputs.json).core.ref }}
+          path: .deps/core
+          persist-credentials: false
+      - name: Check out Contracts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(steps.dependencies.outputs.json).contracts.repository }}
+          ref: ${{ fromJSON(steps.dependencies.outputs.json).contracts.ref }}
+          path: .deps/contracts
+          persist-credentials: false
+      - name: Check out Platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(steps.dependencies.outputs.json).platform.repository }}
+          ref: ${{ fromJSON(steps.dependencies.outputs.json).platform.ref }}
+          path: .deps/platform
+          persist-credentials: false
+      - name: Check out Integrations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(steps.dependencies.outputs.json).integrations.repository }}
+          ref: ${{ fromJSON(steps.dependencies.outputs.json).integrations.ref }}
+          path: .deps/integrations
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+      - name: Configure exact source workspace
+        run: |
+          $root = (Get-Location).Path.Replace('\','/')
+          $lines = @('go 1.27.0','use (', (' "' + $root + '"'))
+          foreach ($name in @('core','contracts','platform','integrations')) { $lines += ' "' + $root + '/.deps/' + $name + '"' }
+          $lines += ')'
+          foreach ($name in @('contracts','document-core','platform','integrations')) {
+            $dir = if ($name -eq 'document-core') { 'core' } else { $name }
+            $lines += 'replace github.com/leafrun/leafrun-' + $name + ' v0.1.0 => "' + $root + '/.deps/' + $dir + '"'
+          }
+          $work = Join-Path $env:RUNNER_TEMP 'e04.work'
+          [IO.File]::WriteAllText($work, ($lines -join "`n") + "`n")
+          "GOWORK=$work" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install verified Typst 0.15.1
+        run: . ./.deps/core/scripts/install-typst.ps1
+      - run: go test ./... -count=1 -v
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go run ./examples/render ./examples/invoice
+      - name: Race detector
+        if: runner.os == 'Linux'
+        run: go test -race ./... -count=1

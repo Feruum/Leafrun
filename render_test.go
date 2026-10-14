@@ -11,7 +11,7 @@ import (
 
 func TestRender(t *testing.T) {
 	if _, err := exec.LookPath("typst"); err != nil {
-		t.Skip("install Typst CLI and add it to PATH")
+		t.Fatal("install Typst CLI 0.15.1 and add it to PATH")
 	}
 
 	t.Run("local files and relative project path", func(t *testing.T) {
