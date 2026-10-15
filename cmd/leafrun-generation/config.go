@@ -46,6 +46,16 @@ func readAPIEnvironment(getenv func(string) string) (apiEnvironment, error) {
 	if err != nil {
 		return config, err
 	}
+	config.Runtime.ProjectsURL = getenv("GENERATION_PROJECTS_URL")
+	config.Runtime.ProjectsToken = getenv("GENERATION_PROJECTS_TOKEN")
+	if (config.Runtime.ProjectsURL == "") != (config.Runtime.ProjectsToken == "") {
+		return config, errors.New("GENERATION_PROJECTS_URL and GENERATION_PROJECTS_TOKEN must be configured together")
+	}
+	for _, value := range []string{config.Runtime.ProjectsURL, config.Runtime.ProjectsToken} {
+		if strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") {
+			return config, errors.New("Generation Projects dependency configuration is invalid")
+		}
+	}
 	config.Runtime.OwnerCallbackToken, err = required(getenv, "GENERATION_OWNER_CALLBACK_TOKEN")
 	if err != nil {
 		return config, err
@@ -64,6 +74,9 @@ func readAPIEnvironment(getenv func(string) string) (apiEnvironment, error) {
 	config.Runtime.Credentials, err = parseCredentials(credentialJSON)
 	if err != nil {
 		return config, errors.New("GENERATION_CREDENTIALS_JSON is invalid")
+	}
+	if err = config.Runtime.ValidateCredentialSeparation(); err != nil {
+		return config, err
 	}
 	config.HTTP = getenv("GENERATION_HTTP_ADDR")
 	if config.HTTP == "" {

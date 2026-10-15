@@ -16,6 +16,11 @@ import (
 )
 
 func openHTTPStoreTest(t *testing.T) *store.Store {
+	state, _ := openHTTPStoreTestWithPool(t)
+	return state
+}
+
+func openHTTPStoreTestWithPool(t *testing.T) (*store.Store, *pgxpool.Pool) {
 	t.Helper()
 	dsn := os.Getenv("GENERATION_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -72,7 +77,7 @@ func openHTTPStoreTest(t *testing.T) *store.Store {
 	if err = state.Migrate(ctx); err != nil {
 		t.Fatalf("apply Generation migrations: %v", err)
 	}
-	return state
+	return state, pool
 }
 
 func TestPostgresHTTPAdmissionPreflightsAndPreservesReceiptAfterSourceExpiry(t *testing.T) {

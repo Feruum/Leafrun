@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/Feruum/Leafrun/internal/store"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 	"github.com/moby/moby/client"
 	"go.temporal.io/sdk/activity"
@@ -119,6 +121,32 @@ func (c *Controller) Execute(ctx context.Context, jobID string) error {
 	if !allowed {
 		return c.state.FailJob(ctx, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
 	}
+	var openInputFiles inputFileOpenerFactory
+	if input.Selection != nil {
+		allowed, err = c.access.Check(ctx, storagev1.AccessCheck{Principal: input.Execution.Actor, Scope: job.Scope, Operation: "generation.create"})
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return c.state.FailJob(ctx, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
+		}
+		if input.Selection.ReleaseID == "" {
+			allowed, err = c.access.Check(ctx, storagev1.AccessCheck{Principal: input.Execution.Actor, Scope: job.Scope, Operation: "source.read", ObjectID: job.SourceSnapshotID})
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return c.state.FailJob(ctx, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
+			}
+		}
+		openInputFiles, err = c.inputFileOpener(ctx, job, input)
+		if errors.Is(err, errInputResourceAccessDenied) {
+			return c.state.FailJob(ctx, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
+		}
+		if err != nil {
+			return err
+		}
+	}
 	if err = c.engine.Ready(ctx); err != nil {
 		return err
 	}
@@ -142,7 +170,7 @@ func (c *Controller) Execute(ctx context.Context, jobID string) error {
 	defer cancelRun()
 	stopHeartbeat := c.heartbeatAttempt(runCtx, cancelRun, attempt)
 	defer stopHeartbeat()
-	if err = c.executeAttempt(runCtx, cancelRun, job, input, attempt); err != nil {
+	if err = c.executeAttempt(runCtx, cancelRun, job, input, attempt, openInputFiles); err != nil {
 		stopHeartbeat()
 		cancelRun()
 		return err
@@ -162,7 +190,11 @@ func (c *Controller) Execute(ctx context.Context, jobID string) error {
 	return nil
 }
 
-func (c *Controller) executeAttempt(ctx context.Context, cancel context.CancelFunc, job generationv1.Job, input store.ExecutionInput, attempt store.Attempt) error {
+func (c *Controller) executeAttempt(ctx context.Context, cancel context.CancelFunc, job generationv1.Job, input store.ExecutionInput, attempt store.Attempt, openInputFileFactory inputFileOpenerFactory) error {
+	var openInputFiles func(projectsv1.PreparedFile) (io.ReadCloser, error)
+	if openInputFileFactory != nil {
+		openInputFiles = openInputFileFactory(ctx)
+	}
 	stagePath := attempt.PrivateStagingPath
 	snapshot, err := c.storage.GetSnapshot(ctx, job.SourceSnapshotID)
 	if err != nil {
@@ -245,7 +277,7 @@ func (c *Controller) executeAttempt(ctx context.Context, cancel context.CancelFu
 
 	inputErr := make(chan error, 1)
 	go func() {
-		writeErr := sandbox.WriteInput(attach.Conn, request, bundle)
+		writeErr := sandbox.WriteInput(attach.Conn, request, bundle, openInputFiles)
 		if writeErr == nil {
 			writeErr = remote.Verify()
 		}

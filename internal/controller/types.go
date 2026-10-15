@@ -37,6 +37,7 @@ type Config struct {
 	OwnerID       string
 	RendererImage string
 	Heartbeat     time.Duration
+	Projects      service.ProjectsClient
 }
 
 func (c Config) validate() error {
@@ -64,7 +65,11 @@ func NewPublisher(s *store.Store, storage Storage, pins DerivedPinner, access se
 	return &Publisher{s, storage, pins, access, cfg}, nil
 }
 func renderRequest(job generationv1.Job, a store.Attempt, in store.ExecutionInput) renderwire.RenderRequest {
-	return renderwire.RenderRequest{Scope: job.Scope, JobID: job.JobID, AttemptID: a.AttemptID, TargetID: job.TargetID, Entrypoint: job.Entrypoint, SourceSnapshotID: job.SourceSnapshotID, SourceContentID: job.SourceContentID, InputFingerprint: job.InputFingerprint, Parameters: in.Request.Parameters, ParametersSchemaPath: in.Request.ParametersSchemaPath}
+	request := renderwire.RenderRequest{Scope: job.Scope, JobID: job.JobID, AttemptID: a.AttemptID, TargetID: job.TargetID, Entrypoint: job.Entrypoint, SourceSnapshotID: job.SourceSnapshotID, SourceContentID: job.SourceContentID, InputFingerprint: job.InputFingerprint, Parameters: in.Request.Parameters, ParametersSchemaPath: in.Request.ParametersSchemaPath}
+	if in.Execution != nil {
+		request.Execution = &renderwire.ExecutionInput{DescriptorDigest: in.Execution.Descriptor.Digest, ExecutionDigest: in.Execution.Descriptor.ExecutionDigest, Profile: in.Execution.Descriptor.SelectedProfile, Prepared: in.Execution.Prepared}
+	}
+	return request
 }
 func (p *Publisher) checkAccess(ctx context.Context, job generationv1.Job, in store.ExecutionInput, operation string) (bool, error) {
 	principal, err := service.DecodeInitiator(in.InitiatorID)

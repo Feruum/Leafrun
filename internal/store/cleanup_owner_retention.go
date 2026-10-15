@@ -122,6 +122,9 @@ func (s *Store) CompleteCleanup(ctx context.Context, id int64, worker string, ep
 		if _, err = tx.Exec(ctx, `UPDATE generation_pin_acquires SET state='released',updated_at=clock_timestamp() WHERE job_id=$1 AND storage_pin_id=$2`, jobID, pinID); err != nil {
 			return err
 		}
+		if _, err = tx.Exec(ctx, `UPDATE generation_input_resources SET pin_state='released' WHERE job_id=$1 AND pin_id=$2`, jobID, pinID); err != nil {
+			return err
+		}
 	}
 	return commit(ctx, tx)
 }
@@ -175,7 +178,22 @@ func (o *Owner) Pin(ctx context.Context, in storagev1.PinOwnerCheck) (storagev1.
 		SELECT 1 FROM generation_pin_acquires p JOIN generation_jobs j ON j.job_id=p.job_id
 		WHERE j.workspace_id=$1 AND j.project_id=$2 AND p.storage_pin_id=$3
 		AND (p.state='active' OR (p.state='pending' AND j.terminal_at IS NULL AND NOT j.cancellation_requested AND j.deadline>clock_timestamp() AND p.expires_at>clock_timestamp()))
-		AND p.response->>'objectId'=$4 AND p.response->>'holderId'=$5 AND p.response->>'holderDomain'=$6
+		AND p.object_id=$4 AND convert_from(p.request,'UTF8')::jsonb->>'objectId'=$4 AND p.response->>'objectId'=$4
+		AND convert_from(p.request,'UTF8')::jsonb->>'idempotencyKey'=p.idempotency_key
+		AND p.response->>'pinId'=p.storage_pin_id
+		AND convert_from(p.request,'UTF8')::jsonb->'scope'->>'workspaceId'=$1
+		AND convert_from(p.request,'UTF8')::jsonb->'scope'->>'projectId'=$2
+		AND p.response->'scope'=convert_from(p.request,'UTF8')::jsonb->'scope'
+		AND convert_from(p.request,'UTF8')::jsonb->>'holderId'=$5 AND p.response->>'holderId'=$5
+		AND convert_from(p.request,'UTF8')::jsonb->>'holderDomain'=$6 AND p.response->>'holderDomain'=$6
+		AND convert_from(p.request,'UTF8')::jsonb->>'retentionPolicy'=p.response->>'retentionPolicy'
+		AND (p.object_id=j.source_snapshot_id OR p.object_id=j.derived_snapshot_id OR EXISTS(
+			SELECT 1 FROM generation_input_resources r WHERE r.job_id=j.job_id AND r.resource_id=p.object_id
+			AND r.acquisition_key=p.idempotency_key AND r.workspace_id=j.workspace_id AND r.project_id=j.project_id
+			AND r.object_class='resource' AND r.pin_state IN ('pending','active')
+			AND (r.pin_id='' OR r.pin_id=p.storage_pin_id)
+			AND convert_from(p.request,'UTF8')::jsonb->>'retentionPolicy'='ordinary' AND p.response->>'retentionPolicy'='ordinary'
+		))
 		AND (j.terminal_at IS NULL OR j.terminal_at+($7::bigint*interval '1 microsecond')>clock_timestamp())
 		AND NOT EXISTS(SELECT 1 FROM generation_cleanup_intents c WHERE c.job_id=j.job_id AND c.kind='pin.release' AND c.state='complete' AND c.idempotency_key='release/'||p.storage_pin_id)
 	)`, in.Scope.WorkspaceID, in.Scope.ProjectID, in.PinID, in.ObjectID, in.HolderID, in.HolderDomain, o.store.cfg.DiagnosticTTL.Microseconds()).Scan(&yes)
@@ -184,6 +202,36 @@ func (o *Owner) Pin(ctx context.Context, in storagev1.PinOwnerCheck) (storagev1.
 	}
 	if yes {
 		return storagev1.OwnerReferenced, nil
+	}
+	var uncertain bool
+	err = o.store.pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM generation_pin_acquires p JOIN generation_jobs j ON j.job_id=p.job_id
+		WHERE j.workspace_id=$1 AND j.project_id=$2 AND p.object_id=$3
+		AND p.state='pending' AND p.response IS NULL AND p.storage_pin_id=''
+		AND convert_from(p.request,'UTF8')::jsonb->>'objectId'=$3
+		AND convert_from(p.request,'UTF8')::jsonb->>'idempotencyKey'=p.idempotency_key
+		AND convert_from(p.request,'UTF8')::jsonb->'scope'->>'workspaceId'=$1
+		AND convert_from(p.request,'UTF8')::jsonb->'scope'->>'projectId'=$2
+		AND convert_from(p.request,'UTF8')::jsonb->>'retentionPolicy'='ordinary'
+		AND convert_from(p.request,'UTF8')::jsonb->>'holderId'=$4
+		AND convert_from(p.request,'UTF8')::jsonb->>'holderDomain'=$5
+		AND j.terminal_at IS NULL AND NOT j.cancellation_requested AND j.deadline>clock_timestamp()
+		AND (
+			(p.object_id=j.source_snapshot_id AND j.status IN ('queued','preparing'))
+			OR (j.derived_snapshot_id<>'' AND p.object_id=j.derived_snapshot_id AND j.status IN ('preparing','publishing'))
+			OR EXISTS(
+				SELECT 1 FROM generation_input_resources r
+				WHERE r.job_id=j.job_id AND r.resource_id=p.object_id AND r.acquisition_key=p.idempotency_key
+				AND r.workspace_id=j.workspace_id AND r.project_id=j.project_id AND r.object_class='resource'
+				AND r.pin_state='pending' AND r.pin_id=''
+			)
+		)
+	)`, in.Scope.WorkspaceID, in.Scope.ProjectID, in.ObjectID, in.HolderID, in.HolderDomain).Scan(&uncertain)
+	if err != nil {
+		return storagev1.OwnerUnknown, fmt.Errorf("query Generation pending pin owner: %w", err)
+	}
+	if uncertain {
+		return storagev1.OwnerUnknown, nil
 	}
 	return storagev1.OwnerAbsent, nil
 }
@@ -274,7 +322,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		ON CONFLICT(job_id,kind,idempotency_key) DO NOTHING`, s.cfg.DiagnosticTTL.Microseconds()); err != nil {
 		return out, err
 	}
-	if tag, err = tx.Exec(ctx, `UPDATE generation_jobs SET parameters=NULL,normalized_request=''::bytea,raw_diagnostics='',diagnostics='[]'::jsonb,updated_at=clock_timestamp() WHERE terminal_at IS NOT NULL AND terminal_at+$1*interval '1 microsecond'<=clock_timestamp() AND (parameters IS NOT NULL OR octet_length(normalized_request)>0 OR raw_diagnostics<>'' OR diagnostics<>'[]'::jsonb)`, s.cfg.DiagnosticTTL.Microseconds()); err != nil {
+	if tag, err = tx.Exec(ctx, `UPDATE generation_jobs SET parameters=NULL,normalized_request=''::bytea,selection_request=NULL,selection_fingerprint=NULL,actor_subject='',actor_domain='',raw_diagnostics='',diagnostics='[]'::jsonb,updated_at=clock_timestamp() WHERE terminal_at IS NOT NULL AND terminal_at+$1*interval '1 microsecond'<=clock_timestamp() AND (parameters IS NOT NULL OR octet_length(normalized_request)>0 OR selection_request IS NOT NULL OR raw_diagnostics<>'' OR diagnostics<>'[]'::jsonb)`, s.cfg.DiagnosticTTL.Microseconds()); err != nil {
 		return out, err
 	}
 	out.SensitiveFieldsCleared = tag.RowsAffected()

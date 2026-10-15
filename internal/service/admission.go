@@ -61,6 +61,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.ready(w, r)
 	case r.URL.Path == "/v1/jobs" && r.Method == http.MethodPost:
 		s.createJob(w, r)
+	case r.URL.Path == "/v1/renders" && r.Method == http.MethodPost:
+		s.createRender(w, r)
+	case r.URL.Path == "/v1/renders":
+		w.Header().Set("Allow", http.MethodPost)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The HTTP method is not supported")
 	case r.URL.Path == "/internal/v1/checks/publishable" && r.Method == http.MethodPost:
 		s.publishable(w, r)
 	case r.URL.Path == "/internal/v1/checks/pin-owner" && r.Method == http.MethodPost:
@@ -177,7 +182,163 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 // EnsureSourcePin recovers one admission from its persisted pin intent. It is
 // shared by HTTP retries and the admission reconciler.
 func (s *Server) EnsureSourcePin(ctx context.Context, job generationv1.Job) error {
+	active, err := s.store.AdmissionActivated(ctx, job.JobID)
+	if err != nil || active {
+		return err
+	}
+	if err = s.ensureInputPins(ctx, job); err != nil {
+		return err
+	}
 	return s.ensureSnapshotPin(ctx, job, job.SourceSnapshotID, true)
+}
+
+type inputPinAdmissionStore interface {
+	InputPinAcquires(context.Context, string) ([]store.InputPinAcquire, error)
+	RotateInputPinAcquireKey(context.Context, string, string, string, string) error
+	MarkInputPinActive(context.Context, string, string, storagev1.Pin) error
+}
+
+// ensureInputPins activates every unique file resource before the source pin
+// can durably create the workflow-start intent.
+func (s *Server) ensureInputPins(ctx context.Context, job generationv1.Job) error {
+	state, ok := s.store.(inputPinAdmissionStore)
+	if !ok {
+		return nil // Older test/store adapters own no E05 file resources.
+	}
+	items, err := state.InputPinAcquires(ctx, job.JobID)
+	if err != nil {
+		return fmt.Errorf("load input resource pin intents: %w", err)
+	}
+	for _, item := range items {
+		if err = s.ensureInputPin(ctx, state, job, item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) ensureInputPin(ctx context.Context, state inputPinAdmissionStore, job generationv1.Job, item store.InputPinAcquire) error {
+	resource := item.Resource.File
+	if resource.ResourceID == "" || item.Resource.Scope != job.Scope || item.Resource.Class != storagev1.ClassResource || item.AcquisitionKey == "" {
+		return errors.New("persisted input resource pin binding is invalid")
+	}
+	for rotations := 0; rotations <= maxPinRotations; rotations++ {
+		latest, err := s.store.LatestPinAcquire(ctx, job.JobID, resource.ResourceID)
+		if errors.Is(err, store.ErrNotFound) || err == nil && latest.State == "failed" && latest.Key != item.AcquisitionKey {
+			request := storagev1.AcquirePinRequest{Scope: job.Scope, ObjectID: resource.ResourceID, HolderID: "leafrun-generation", HolderDomain: "service", RetentionPolicy: "ordinary", IdempotencyKey: item.AcquisitionKey}
+			latest, err = s.beginInputPinIntent(ctx, job, item, request)
+		} else if err == nil && latest.State == "failed" {
+			newKey, keyErr := newPinKey()
+			if keyErr != nil {
+				return keyErr
+			}
+			if err = state.RotateInputPinAcquireKey(ctx, job.JobID, resource.ResourceID, latest.Key, newKey); err == nil {
+				item.AcquisitionKey = newKey
+				request := storagev1.AcquirePinRequest{Scope: job.Scope, ObjectID: resource.ResourceID, HolderID: "leafrun-generation", HolderDomain: "service", RetentionPolicy: "ordinary", IdempotencyKey: item.AcquisitionKey}
+				latest, err = s.beginInputPinIntent(ctx, job, item, request)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("load or save input resource pin intent: %w", err)
+		}
+		request, err := decodePinRequest(latest.Request)
+		if err != nil || request.Scope != job.Scope || request.ObjectID != resource.ResourceID || request.IdempotencyKey != latest.Key || request.RetentionPolicy != "ordinary" || latest.Key != item.AcquisitionKey {
+			return errors.New("persisted input resource pin intent does not match its allowlist")
+		}
+		var pin storagev1.Pin
+		if latest.Response != nil {
+			pin, err = s.cfg.Pins.GetPin(ctx, latest.Response.PinID)
+			if isExpiredPinError(err) {
+				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, latest.Key); e != nil {
+					return fmt.Errorf("record expired input resource pin: %w", e)
+				}
+				if err = s.rotateInputPin(ctx, state, job, resource.ResourceID, latest.Key, &item); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("read input resource pin: %w", err)
+			}
+		} else {
+			pin, err = s.cfg.Pins.AcquirePin(ctx, request)
+			if isExpiredPinError(err) {
+				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, latest.Key); e != nil {
+					return fmt.Errorf("record expired input resource pin: %w", e)
+				}
+				if err = s.rotateInputPin(ctx, state, job, resource.ResourceID, latest.Key, &item); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("acquire input resource pin: %w", err)
+			}
+		}
+		if err = validatePin(request, pin); err != nil {
+			return err
+		}
+		if err = s.store.RecordPinAcquireResponse(ctx, job.JobID, latest.Key, pin); err != nil {
+			return fmt.Errorf("persist input resource pin receipt: %w", err)
+		}
+		activated, activateErr := s.cfg.Pins.ActivatePin(ctx, pin.PinID)
+		if activateErr != nil {
+			if isExpiredPinError(activateErr) {
+				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, latest.Key); e != nil {
+					return fmt.Errorf("record expired input resource pin: %w", e)
+				}
+				if err = s.rotateInputPin(ctx, state, job, resource.ResourceID, latest.Key, &item); err != nil {
+					return err
+				}
+				continue
+			}
+			var rejection *HTTPStatusError
+			if errors.As(activateErr, &rejection) {
+				return fmt.Errorf("Storage rejected input resource pin activation: %w", activateErr)
+			}
+			activated, err = s.cfg.Pins.GetPin(ctx, pin.PinID)
+			if isExpiredPinError(err) {
+				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, latest.Key); e != nil {
+					return fmt.Errorf("record expired input resource pin: %w", e)
+				}
+				if err = s.rotateInputPin(ctx, state, job, resource.ResourceID, latest.Key, &item); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("recover input resource pin activation: %w", err)
+			}
+		}
+		pin = activated
+		if err = validatePin(request, pin); err != nil || pin.State != "active" {
+			return errors.New("Storage did not confirm an active input resource pin")
+		}
+		if err = s.store.RecordPinAcquireResponse(ctx, job.JobID, latest.Key, pin); err != nil {
+			return fmt.Errorf("persist active input resource pin: %w", err)
+		}
+		if err = state.MarkInputPinActive(ctx, job.JobID, latest.Key, pin); err != nil {
+			return fmt.Errorf("record active input resource pin: %w", err)
+		}
+		return nil
+	}
+	return errors.New("input resource pin expired repeatedly before activation")
+}
+
+func (s *Server) beginInputPinIntent(ctx context.Context, job generationv1.Job, item store.InputPinAcquire, request storagev1.AcquirePinRequest) (store.PinAcquire, error) {
+	return s.store.BeginPinAcquireIntent(ctx, store.PinAcquireIntent{JobID: job.JobID, IdempotencyKey: item.AcquisitionKey, Request: request})
+}
+
+func (s *Server) rotateInputPin(ctx context.Context, state inputPinAdmissionStore, job generationv1.Job, resourceID, oldKey string, item *store.InputPinAcquire) error {
+	newKey, err := newPinKey()
+	if err != nil {
+		return err
+	}
+	if err = state.RotateInputPinAcquireKey(ctx, job.JobID, resourceID, oldKey, newKey); err != nil {
+		return fmt.Errorf("rotate expired input resource pin: %w", err)
+	}
+	item.AcquisitionKey = newKey
+	return nil
 }
 
 // EnsureDerivedPin acquires and activates the ordinary pin for a derived
@@ -357,7 +518,7 @@ func validatePin(request storagev1.AcquirePinRequest, pin storagev1.Pin) error {
 
 func isExpiredPinError(err error) bool {
 	var response *HTTPStatusError
-	return errors.As(err, &response) && (response.StatusCode == http.StatusGone || response.StatusCode == http.StatusConflict && response.Code == "pin_expired")
+	return errors.As(err, &response) && response.StatusCode == http.StatusConflict && response.Code == "pin_expired"
 }
 
 func isHTTPStatus(err error, status int) bool {

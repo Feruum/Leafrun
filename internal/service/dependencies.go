@@ -171,6 +171,15 @@ func (c *PinClient) GetSnapshot(ctx context.Context, snapshotID string) (storage
 	return snapshot, err
 }
 
+func (c *PinClient) GetResource(ctx context.Context, resourceID string) (storagev1.Resource, error) {
+	if !validIdentifier(resourceID) || strings.ContainsAny(resourceID, "/\\") {
+		return storagev1.Resource{}, errors.New("invalid resource ID")
+	}
+	var resource storagev1.Resource
+	err := c.http.callBounded(ctx, http.MethodGet, "/internal/v1/resources/"+url.PathEscape(resourceID), nil, &resource, 1<<20)
+	return resource, err
+}
+
 func (c *PinClient) GetPin(ctx context.Context, pinID string) (storagev1.Pin, error) {
 	if !validIdentifier(pinID) || strings.ContainsAny(pinID, "/\\") {
 		return storagev1.Pin{}, errors.New("invalid pin ID")

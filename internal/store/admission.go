@@ -3,6 +3,8 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	"github.com/leafrun/leafrun-contracts/jsonvalue/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 )
 
@@ -31,6 +34,7 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 		return out, false, err
 	}
 	var oldFingerprint, oldJob string
+	receiptFingerprint := admissionReceiptFingerprint(in)
 	var expiry time.Time
 	err = tx.QueryRow(ctx, `SELECT fingerprint,job_id,expires_at FROM generation_admission_receipts WHERE workspace_id=$1 AND initiator_id=$2 AND idempotency_key=$3 FOR UPDATE`, in.WorkspaceID, in.InitiatorID, in.IdempotencyKey).Scan(&oldFingerprint, &oldJob, &expiry)
 	if err == nil {
@@ -39,7 +43,7 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 			return out, false, e
 		}
 		if live {
-			if oldFingerprint != in.Fingerprint {
+			if oldFingerprint != receiptFingerprint {
 				return out, false, ErrConflict
 			}
 			j, e := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE job_id=$1`, oldJob))
@@ -72,15 +76,24 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 	if e != nil {
 		return out, false, e
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO generation_jobs(job_id,workspace_id,project_id,initiator_id,idempotency_key,normalized_request,parameters,fingerprint,source_snapshot_id,target_id,entrypoint,engine_version,status,phase,deadline)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'queued','pin_pending',clock_timestamp()+interval '15 minutes')`, jobID, in.WorkspaceID, in.ProjectID, in.InitiatorID, in.IdempotencyKey, in.NormalizedRequest, in.Parameters, in.Fingerprint, in.SnapshotID, in.TargetID, in.Entrypoint, in.EngineVersion)
+	var selectionRequest, selectionFingerprint any
+	var actorSubject, actorDomain any = "", ""
+	if len(in.SelectionRequest) > 0 {
+		selectionRequest, selectionFingerprint = in.SelectionRequest, in.SelectionFingerprint
+		actorSubject, actorDomain = in.Actor.Subject, in.Actor.Domain
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO generation_jobs(job_id,workspace_id,project_id,initiator_id,idempotency_key,normalized_request,parameters,fingerprint,source_snapshot_id,source_content_id,target_id,entrypoint,engine_version,status,phase,deadline,selection_request,selection_fingerprint,actor_subject,actor_domain)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'queued','pin_pending',clock_timestamp()+interval '15 minutes',$14,$15,$16,$17)`, jobID, in.WorkspaceID, in.ProjectID, in.InitiatorID, in.IdempotencyKey, in.NormalizedRequest, in.Parameters, in.Fingerprint, in.SnapshotID, in.SourceContentID, in.TargetID, in.Entrypoint, in.EngineVersion, selectionRequest, selectionFingerprint, actorSubject, actorDomain)
 	if err != nil {
 		return out, false, fmt.Errorf("insert generation job: %w", err)
+	}
+	if err = insertInputResources(ctx, tx, jobID, in.InputResources); err != nil {
+		return out, false, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO generation_reservations(job_id,workspace_id,reservation_type) VALUES($1,$2,'queue')`, jobID, in.WorkspaceID); err != nil {
 		return out, false, fmt.Errorf("reserve generation queue slot: %w", err)
 	}
-	if err = tx.QueryRow(ctx, `INSERT INTO generation_admission_receipts(workspace_id,initiator_id,idempotency_key,fingerprint,job_id,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+$6*interval '1 microsecond') RETURNING expires_at`, in.WorkspaceID, in.InitiatorID, in.IdempotencyKey, in.Fingerprint, jobID, s.cfg.ReceiptTTL.Microseconds()).Scan(&out.IdempotencyExpiresAt); err != nil {
+	if err = tx.QueryRow(ctx, `INSERT INTO generation_admission_receipts(workspace_id,initiator_id,idempotency_key,fingerprint,job_id,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+$6*interval '1 microsecond') RETURNING expires_at`, in.WorkspaceID, in.InitiatorID, in.IdempotencyKey, receiptFingerprint, jobID, s.cfg.ReceiptTTL.Microseconds()).Scan(&out.IdempotencyExpiresAt); err != nil {
 		return out, false, fmt.Errorf("persist admission receipt: %w", err)
 	}
 	j, e := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE job_id=$1`, jobID))
@@ -94,15 +107,48 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 	return out, false, nil
 }
 
-func validateAdmission(in AdmitInput) error {
-	if len(in.NormalizedRequest) == 0 || len(in.NormalizedRequest) > 1<<20 || len(in.Parameters) > 1<<20 {
-		return errors.New("normalized request and parameters must be bounded nonempty request data")
+const resolvedExecutionVersion = "leafrun-resolved-execution-v1"
+
+// NormalizeResolvedExecution produces the canonical durable execution bytes
+// and their versioned content fingerprint. Actor and selection receipt data
+// remain part of the authority, while renderer profile and file metadata are
+// frozen alongside the prepared JSON.
+func NormalizeResolvedExecution(execution projectsv1.ResolvedExecution) ([]byte, string, error) {
+	encoded, err := json.Marshal(execution)
+	if err != nil || len(encoded) == 0 || int64(len(encoded)) > projectsv1.ResponseLimit {
+		return nil, "", errors.New("resolved execution exceeds the canonical 12 MiB limit")
 	}
+	var decoded projectsv1.ResolvedExecution
+	if err = jsonvalue.Unmarshal(encoded, &decoded, projectsv1.ResponseLimit); err != nil {
+		return nil, "", err
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil || !bytes.Equal(canonical, encoded) {
+		return nil, "", errors.New("resolved execution is not canonical")
+	}
+	sum := sha256.Sum256(append([]byte(resolvedExecutionVersion+"\n"), encoded...))
+	return encoded, hex.EncodeToString(sum[:]), nil
+}
+
+func admissionReceiptFingerprint(in AdmitInput) string {
+	if len(in.SelectionRequest) > 0 {
+		return in.SelectionFingerprint
+	}
+	return in.Fingerprint
+}
+
+func validateAdmission(in AdmitInput) error {
 	if in.WorkspaceID == "" || in.ProjectID == "" || in.InitiatorID == "" || !generationv1.ValidIdempotencyKey(in.IdempotencyKey) {
 		return errors.New("workspace, project, initiator and valid idempotency key are required")
 	}
 	if strings.TrimSpace(in.EngineVersion) == "" || len(in.EngineVersion) > 128 {
 		return errors.New("bounded engine version is required")
+	}
+	if len(in.SelectionRequest) > 0 || in.SelectionFingerprint != "" || in.ResolvedExecution != nil || len(in.InputResources) > 0 {
+		return validateSelectionAdmission(in)
+	}
+	if len(in.NormalizedRequest) == 0 || len(in.NormalizedRequest) > 1<<20 || len(in.Parameters) > 1<<20 {
+		return errors.New("normalized request and parameters must be bounded nonempty request data")
 	}
 	request, normalized, fingerprint, err := generationv1.NormalizeRequest(in.NormalizedRequest)
 	if err != nil {
@@ -117,8 +163,74 @@ func validateAdmission(in AdmitInput) error {
 	if request.SnapshotID != in.SnapshotID || request.TargetID != in.TargetID || request.Entrypoint != in.Entrypoint {
 		return errors.New("admission identity does not match the normalized request")
 	}
-	if !bytes.Equal(request.Parameters, in.Parameters) {
-		return errors.New("parameter bytes do not match the normalized request")
+	if !bytes.Equal(request.Parameters, in.Parameters) || in.SourceContentID != "" || in.Actor != (storagev1.Principal{}) {
+		return errors.New("legacy request parameters or actor fields do not match the normalized request")
+	}
+	return nil
+}
+
+func validateSelectionAdmission(in AdmitInput) error {
+	if len(in.SelectionRequest) == 0 || len(in.SelectionRequest) > 1<<20 || len(in.NormalizedRequest) == 0 || int64(len(in.NormalizedRequest)) > projectsv1.ResponseLimit || len(in.Parameters) == 0 || len(in.Parameters) > 1<<20 || in.ResolvedExecution == nil {
+		return errors.New("selection and resolved execution must be bounded nonempty data")
+	}
+	selection, normalizedSelection, fingerprint, err := generationv1.NormalizeSelection(in.SelectionRequest)
+	if err != nil || !bytes.Equal(normalizedSelection, in.SelectionRequest) || fingerprint != in.SelectionFingerprint {
+		return errors.New("selection bytes or fingerprint are not the Contracts canonical form")
+	}
+	canonicalExecution, executionFingerprint, err := NormalizeResolvedExecution(*in.ResolvedExecution)
+	if err != nil || !bytes.Equal(canonicalExecution, in.NormalizedRequest) || executionFingerprint != in.Fingerprint {
+		return errors.New("resolved execution bytes or fingerprint are not canonical")
+	}
+	execution := *in.ResolvedExecution
+	resolveRequest := projectsv1.ResolveRequest{Actor: in.Actor, Selection: selection, SelectionFingerprint: fingerprint}
+	if err = projectsv1.ValidateResolved(resolveRequest, execution); err != nil {
+		return fmt.Errorf("validate resolved Projects execution: %w", err)
+	}
+	if !projectsv1.ValidIdentifier(in.Actor.Subject) || !projectsv1.ValidIdentifier(in.Actor.Domain) || execution.Actor != in.Actor || selection.Scope.WorkspaceID != in.WorkspaceID || selection.Scope.ProjectID != in.ProjectID || execution.Scope != selection.Scope {
+		return errors.New("resolved execution actor or scope does not match the admission")
+	}
+	if execution.SnapshotID != in.SnapshotID || execution.ContentID != in.SourceContentID || execution.Descriptor.TargetID != in.TargetID || execution.Descriptor.Entrypoint != in.Entrypoint || execution.Descriptor.TypstVersion != in.EngineVersion || !bytes.Equal(execution.Prepared.JSON, in.Parameters) {
+		return errors.New("resolved execution identity or parameters do not match the admission")
+	}
+	if len(in.InputResources) != len(execution.InputResources) {
+		return errors.New("input resource intents do not match the resolved execution")
+	}
+	byPointer := make(map[string]projectsv1.InputResource, len(execution.InputResources))
+	for _, resource := range execution.InputResources {
+		byPointer[resource.File.Pointer] = resource
+	}
+	keyByResource := make(map[string]string, len(in.InputResources))
+	resourceByKey := make(map[string]string, len(in.InputResources))
+	for _, intent := range in.InputResources {
+		file := intent.Resource.File
+		resource, exists := byPointer[file.Pointer]
+		if !exists || resource != intent.Resource || intent.Resource.Scope != execution.Scope || intent.Resource.Class != storagev1.ClassResource || !generationv1.ValidIdempotencyKey(intent.AcquisitionKey) {
+			return errors.New("input resource pin intent differs from the resolved allowlist")
+		}
+		if prior, exists := keyByResource[file.ResourceID]; exists && prior != intent.AcquisitionKey {
+			return errors.New("one input resource must share one pin acquisition")
+		}
+		if prior, exists := resourceByKey[intent.AcquisitionKey]; exists && prior != file.ResourceID {
+			return errors.New("input resource pin acquisition key is shared across resources")
+		}
+		keyByResource[file.ResourceID] = intent.AcquisitionKey
+		resourceByKey[intent.AcquisitionKey] = file.ResourceID
+		delete(byPointer, file.Pointer)
+	}
+	if len(byPointer) != 0 {
+		return errors.New("input resource pin intent is missing a resolved file")
+	}
+	return nil
+}
+
+func insertInputResources(ctx context.Context, tx pgx.Tx, jobID string, resources []InputResourceIntent) error {
+	for _, input := range resources {
+		file := input.Resource.File
+		_, err := tx.Exec(ctx, `INSERT INTO generation_input_resources(job_id,field_pointer,resource_id,workspace_id,project_id,object_class,filename,generated_path,size_bytes,sha256,acquisition_key)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, jobID, file.Pointer, file.ResourceID, input.Resource.Scope.WorkspaceID, input.Resource.Scope.ProjectID, input.Resource.Class, file.Filename, file.Path, file.SizeBytes, file.SHA256, input.AcquisitionKey)
+		if err != nil {
+			return fmt.Errorf("persist input resource allowlist: %w", err)
+		}
 	}
 	return nil
 }
@@ -181,16 +293,90 @@ func (s *Store) RecordPinAcquireExpired(ctx context.Context, jobID, key string) 
 	} else if err != nil {
 		return err
 	}
-	var state string
-	if err = tx.QueryRow(ctx, `SELECT state FROM generation_pin_acquires WHERE job_id=$1 AND idempotency_key=$2 FOR UPDATE`, jobID, key).Scan(&state); errors.Is(err, pgx.ErrNoRows) {
+	var state, objectID string
+	if err = tx.QueryRow(ctx, `SELECT state,object_id FROM generation_pin_acquires WHERE job_id=$1 AND idempotency_key=$2 FOR UPDATE`, jobID, key).Scan(&state, &objectID); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
 	}
-	if state != "pending" && state != "failed" {
+	var inputResource, workflowStarted bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generation_input_resources WHERE job_id=$1 AND resource_id=$2 AND acquisition_key=$3),EXISTS(SELECT 1 FROM generation_workflow_starts WHERE job_id=$1)`, jobID, objectID, key).Scan(&inputResource, &workflowStarted); err != nil {
+		return err
+	}
+	if state != "pending" && state != "failed" && !(state == "active" && inputResource && !workflowStarted) {
 		return ErrInvalidTransition
 	}
 	if _, err = tx.Exec(ctx, `UPDATE generation_pin_acquires SET state='failed',expires_at=clock_timestamp(),updated_at=clock_timestamp() WHERE job_id=$1 AND idempotency_key=$2`, jobID, key); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE generation_input_resources SET pin_state='failed',pin_id='' WHERE job_id=$1 AND acquisition_key=$2 AND pin_state IN ('pending','active')`, jobID, key); err != nil {
+		return err
+	}
+	return commit(ctx, tx)
+}
+
+// InputPinAcquires returns one durable acquisition row per unique resource.
+// Duplicate field pointers share the same Storage pin and key.
+func (s *Store) InputPinAcquires(ctx context.Context, jobID string) ([]InputPinAcquire, error) {
+	if jobID == "" {
+		return nil, ErrNotFound
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ON (r.acquisition_key) r.resource_id,r.workspace_id,r.project_id,r.object_class,r.field_pointer,r.filename,r.generated_path,r.size_bytes,r.sha256,r.acquisition_key,r.pin_id,r.pin_state
+		FROM generation_input_resources r WHERE r.job_id=$1 ORDER BY r.acquisition_key,r.field_pointer`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InputPinAcquire
+	for rows.Next() {
+		var item InputPinAcquire
+		var file projectsv1.PreparedFile
+		if err = rows.Scan(&file.ResourceID, &item.Resource.Scope.WorkspaceID, &item.Resource.Scope.ProjectID, &item.Resource.Class, &file.Pointer, &file.Filename, &file.Path, &file.SizeBytes, &file.SHA256, &item.AcquisitionKey, &item.PinID, &item.State); err != nil {
+			return nil, err
+		}
+		item.Resource.File = file
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// RotateInputPinAcquireKey changes the durable allowlist only after Storage
+// authoritatively expired the prior key.
+func (s *Store) RotateInputPinAcquireKey(ctx context.Context, jobID, resourceID, oldKey, newKey string) error {
+	if jobID == "" || resourceID == "" || !generationv1.ValidIdempotencyKey(oldKey) || !generationv1.ValidIdempotencyKey(newKey) || oldKey == newKey {
+		return errors.New("job, resource and distinct bounded pin keys are required")
+	}
+	tx, err := begin(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+	var terminalAt *time.Time
+	if err = tx.QueryRow(ctx, `SELECT terminal_at FROM generation_jobs WHERE job_id=$1 FOR UPDATE`, jobID).Scan(&terminalAt); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if terminalAt != nil {
+		return ErrInvalidTransition
+	}
+	var expired string
+	if err = tx.QueryRow(ctx, `SELECT state FROM generation_pin_acquires WHERE job_id=$1 AND idempotency_key=$2 FOR UPDATE`, jobID, oldKey).Scan(&expired); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if expired != "failed" {
+		return ErrInvalidTransition
+	}
+	var exists bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generation_input_resources WHERE job_id=$1 AND resource_id=$2 AND acquisition_key=$3 AND pin_state='failed')`, jobID, resourceID, oldKey).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrConflict
+	}
+	if _, err = tx.Exec(ctx, `UPDATE generation_input_resources SET acquisition_key=$4,pin_state='pending',pin_id='' WHERE job_id=$1 AND resource_id=$2 AND acquisition_key=$3 AND pin_state='failed'`, jobID, resourceID, oldKey, newKey); err != nil {
 		return err
 	}
 	return commit(ctx, tx)
@@ -276,7 +462,13 @@ func (s *Store) BeginPinAcquireIntent(ctx context.Context, in PinAcquireIntent) 
 			return out, ErrInvalidTransition
 		}
 	} else {
-		return out, errors.New("pin request must target the admitted source or recorded derived snapshot")
+		var allowed bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generation_input_resources WHERE job_id=$1 AND resource_id=$2 AND acquisition_key=$3 AND workspace_id=$4 AND project_id=$5 AND object_class='resource' AND pin_state IN ('pending','failed'))`, in.JobID, in.Request.ObjectID, in.IdempotencyKey, workspace, project).Scan(&allowed); err != nil {
+			return out, err
+		}
+		if !allowed || status != "queued" || in.Request.RetentionPolicy != "ordinary" {
+			return out, errors.New("pin request must match an admitted input resource or snapshot")
+		}
 	}
 	var response []byte
 	err = tx.QueryRow(ctx, `SELECT acquire_number,idempotency_key,request,response,state,expires_at FROM generation_pin_acquires WHERE job_id=$1 AND idempotency_key=$2`, in.JobID, in.IdempotencyKey).Scan(&out.Number, &out.Key, &out.Request, &response, &out.State, &out.ExpiresAt)
@@ -461,6 +653,13 @@ func (s *Store) MarkPinActiveAndRecordWorkflowStart(ctx context.Context, jobID, 
 	if !pinNotExpired {
 		return ErrInvalidTransition
 	}
+	var unpinnedInputs bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generation_input_resources WHERE job_id=$1 AND (pin_state<>'active' OR pin_id=''))`, jobID).Scan(&unpinnedInputs); err != nil {
+		return err
+	}
+	if unpinnedInputs {
+		return ErrInvalidTransition
+	}
 	var requestBytes, stored []byte
 	var pinState string
 	var pinID string
@@ -588,6 +787,76 @@ func (s *Store) MarkPinActive(ctx context.Context, jobID, key string, pin storag
 		}
 	}
 	if _, err = tx.Exec(ctx, `UPDATE generation_pin_acquires SET response=$3::jsonb,storage_pin_id=$4,expires_at=$5,state='active',updated_at=clock_timestamp() WHERE job_id=$1 AND idempotency_key=$2`, jobID, key, encoded, pin.PinID, pin.ExpiresAt); err != nil {
+		return err
+	}
+	return commit(ctx, tx)
+}
+
+// MarkInputPinActive records one resource pin after Storage confirmed its
+// exact active receipt. Input rows become renderable only with that receipt.
+func (s *Store) MarkInputPinActive(ctx context.Context, jobID, key string, pin storagev1.Pin) error {
+	if jobID == "" || key == "" || pin.PinID == "" || pin.State != "active" {
+		return errors.New("job, input acquisition key and active Storage pin are required")
+	}
+	encoded, err := json.Marshal(pin)
+	if err != nil {
+		return err
+	}
+	tx, err := begin(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+	var workspace, project, status string
+	var deadlineOK bool
+	err = tx.QueryRow(ctx, `SELECT workspace_id,project_id,status,deadline>clock_timestamp() FROM generation_jobs WHERE job_id=$1 FOR UPDATE`, jobID).Scan(&workspace, &project, &status, &deadlineOK)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != "queued" || !deadlineOK || pin.Scope != (storagev1.Scope{WorkspaceID: workspace, ProjectID: project}) || pin.HolderID != s.cfg.PinHolderID || pin.HolderDomain != s.cfg.PinHolderDomain || pin.RetentionPolicy != "ordinary" {
+		return ErrInvalidTransition
+	}
+	var unexpired bool
+	if err = tx.QueryRow(ctx, `SELECT $1::timestamptz>clock_timestamp()`, pin.ExpiresAt).Scan(&unexpired); err != nil {
+		return err
+	}
+	if !unexpired {
+		return ErrInvalidTransition
+	}
+	var requestBytes, storedBytes []byte
+	var state, priorID string
+	err = tx.QueryRow(ctx, `SELECT request,response,state,storage_pin_id FROM generation_pin_acquires WHERE job_id=$1 AND idempotency_key=$2 FOR UPDATE`, jobID, key).Scan(&requestBytes, &storedBytes, &state, &priorID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var acquire storagev1.AcquirePinRequest
+	if err = jsonvalue.Unmarshal(requestBytes, &acquire, 1<<20); err != nil {
+		return err
+	}
+	if acquire.IdempotencyKey != key || acquire.Scope != pin.Scope || acquire.ObjectID != pin.ObjectID || acquire.HolderID != pin.HolderID || acquire.HolderDomain != pin.HolderDomain || acquire.RetentionPolicy != pin.RetentionPolicy || state != "pending" && state != "active" || priorID != pin.PinID || len(storedBytes) == 0 {
+		return ErrConflict
+	}
+	var prior storagev1.Pin
+	if err = jsonvalue.Unmarshal(storedBytes, &prior, 1<<20); err != nil || prior.PinID != pin.PinID || prior.Scope != pin.Scope || prior.ObjectID != pin.ObjectID || prior.HolderID != pin.HolderID || prior.HolderDomain != pin.HolderDomain || prior.RetentionPolicy != pin.RetentionPolicy {
+		return ErrConflict
+	}
+	var allowed bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generation_input_resources WHERE job_id=$1 AND resource_id=$2 AND acquisition_key=$3 AND workspace_id=$4 AND project_id=$5 AND object_class='resource' AND pin_state IN ('pending','active'))`, jobID, pin.ObjectID, key, workspace, project).Scan(&allowed); err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrConflict
+	}
+	if _, err = tx.Exec(ctx, `UPDATE generation_pin_acquires SET response=$3::jsonb,storage_pin_id=$4,expires_at=$5,state='active',updated_at=clock_timestamp() WHERE job_id=$1 AND idempotency_key=$2`, jobID, key, encoded, pin.PinID, pin.ExpiresAt); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE generation_input_resources SET pin_id=$3,pin_state='active' WHERE job_id=$1 AND acquisition_key=$2 AND resource_id=$4`, jobID, key, pin.PinID, pin.ObjectID); err != nil {
 		return err
 	}
 	return commit(ctx, tx)

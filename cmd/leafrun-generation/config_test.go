@@ -87,3 +87,20 @@ func TestReadTemporalEnvironmentUsesIsolatedDefaultNamespace(t *testing.T) {
 		t.Fatalf("Temporal settings = %q %q", address, namespace)
 	}
 }
+
+func TestAPIEnvironmentRejectsPublicCredentialMatchingFixedServiceTokens(t *testing.T) {
+	for _, field := range []string{"GENERATION_PROJECTS_TOKEN", "GENERATION_STORAGE_TOKEN", "GENERATION_OWNER_CALLBACK_TOKEN", "GENERATION_OWNER_TOKEN"} {
+		values := map[string]string{
+			"GENERATION_DATABASE_URL": "postgres://generation@db/generation", "GENERATION_STORAGE_URL": "http://storage:8081", "GENERATION_STORAGE_TOKEN": "storage-secret",
+			"GENERATION_OWNER_URL": "http://access:8082", "GENERATION_OWNER_TOKEN": "access-secret", "GENERATION_OWNER_CALLBACK_TOKEN": "callback-secret",
+			"GENERATION_ENGINE_VERSION": "0.15.1", "GENERATION_CREDENTIALS_JSON": `{"public-service-token":{"subject":"user","domain":"core"}}`,
+		}
+		values[field] = "public-service-token"
+		if field == "GENERATION_PROJECTS_TOKEN" {
+			values["GENERATION_PROJECTS_URL"] = "http://projects:8084"
+		}
+		if _, err := readAPIEnvironment(env(values)); err == nil {
+			t.Errorf("%s could be used by a public caller", field)
+		}
+	}
+}

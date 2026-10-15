@@ -44,6 +44,7 @@ func openControllerRuntime(ctx context.Context, getenv func(string) string) (*se
 	if err != nil {
 		return nil, nil, nil, cfg, err
 	}
+	cfg.Projects = runtime.Projects
 	storage, err := storagev1.NewClient(env.Runtime.StorageURL, env.Runtime.StorageToken, &http.Client{Timeout: 2 * time.Minute})
 	if err != nil {
 		runtime.Close()

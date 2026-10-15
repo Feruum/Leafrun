@@ -8,12 +8,16 @@ import (
 	"io"
 
 	"github.com/leafrun/leafrun-contracts/jsonvalue/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	renderwire "github.com/leafrun/leafrun-contracts/renderwire/v1"
 )
 
 // WriteInput inserts exact normalized parameter bytes into the request frame.
 // It never routes them through an encoder or a numeric value representation.
-func WriteInput(w io.Writer, request renderwire.RenderRequest, source renderwire.Bundle) error {
+func WriteInput(w io.Writer, request renderwire.RenderRequest, source renderwire.Bundle, openFiles ...func(projectsv1.PreparedFile) (io.ReadCloser, error)) error {
+	if len(openFiles) > 1 {
+		return errors.New("at most one input-file opener is allowed")
+	}
 	parameters := request.Parameters
 	if len(parameters) > 0 {
 		normalized, err := jsonvalue.NormalizeObject(parameters)
@@ -40,6 +44,17 @@ func WriteInput(w io.Writer, request renderwire.RenderRequest, source renderwire
 	}
 	if err = renderwire.WriteBundle(e, source); err != nil {
 		return err
+	}
+	if request.Execution != nil {
+		var open func(projectsv1.PreparedFile) (io.ReadCloser, error)
+		if len(openFiles) == 1 {
+			open = openFiles[0]
+		}
+		if err = renderwire.WriteInputFiles(e, request.Execution.Prepared.Files, open); err != nil {
+			return err
+		}
+	} else if len(openFiles) == 1 && openFiles[0] != nil {
+		return errors.New("input-file opener requires a prepared execution")
 	}
 	return e.WriteBytes(renderwire.Terminal, []byte(`{"complete":true}`))
 }

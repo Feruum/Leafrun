@@ -22,6 +22,7 @@ import (
 	"github.com/Feruum/Leafrun/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	renderwire "github.com/leafrun/leafrun-contracts/renderwire/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 	"github.com/leafrun/leafrun-platform/events"
@@ -73,6 +74,90 @@ type accessFixture struct {
 
 func (a accessFixture) Check(context.Context, storagev1.AccessCheck) (bool, error) {
 	return a.allow, a.err
+}
+
+type selectionPublicationAccess struct {
+	allow  bool
+	err    error
+	checks []storagev1.AccessCheck
+}
+
+func (a *selectionPublicationAccess) Check(_ context.Context, check storagev1.AccessCheck) (bool, error) {
+	a.checks = append(a.checks, check)
+	return a.allow, a.err
+}
+
+type selectionPublicationProjects struct {
+	decision projectsv1.CurrentReleaseDecision
+	err      error
+	check    projectsv1.CurrentReleaseCheck
+	calls    int
+}
+
+func (*selectionPublicationProjects) Resolve(context.Context, projectsv1.ResolveRequest) (projectsv1.ResolvedExecution, error) {
+	return projectsv1.ResolvedExecution{}, errors.New("unexpected render resolution")
+}
+
+func (p *selectionPublicationProjects) CurrentRelease(_ context.Context, check projectsv1.CurrentReleaseCheck) (projectsv1.CurrentReleaseDecision, error) {
+	p.calls++
+	p.check = check
+	return p.decision, p.err
+}
+
+func TestSelectionPublicationAuthorizationTracksCurrentReleaseWithoutSourceRead(t *testing.T) {
+	actor := storagev1.Principal{Subject: "actor", Domain: "user"}
+	scope := storagev1.Scope{WorkspaceID: "workspace", ProjectID: "project"}
+	digest := strings.Repeat("a", 64)
+	access := &selectionPublicationAccess{allow: true}
+	projects := &selectionPublicationProjects{decision: projectsv1.CurrentReleaseDecision{Allowed: true}}
+	publisher := &Publisher{access: access, cfg: Config{Projects: projects}}
+	job := generationv1.Job{JobID: "gen_job", Scope: scope, SourceSnapshotID: "snapshot-1"}
+	input := store.ExecutionInput{
+		Selection: &generationv1.RenderSelectionRequest{Scope: scope, ReleaseID: "release-1"},
+		Execution: &projectsv1.ResolvedExecution{Actor: actor, Scope: scope, ReleaseID: "release-1", Descriptor: projectsv1.TargetDescriptor{Digest: digest}},
+	}
+	allowed, err := publisher.selectionStillAuthorized(context.Background(), job, input)
+	if err != nil || !allowed {
+		t.Fatalf("published release authorization = %v, %v", allowed, err)
+	}
+	if len(access.checks) != 1 || access.checks[0].Operation != "generation.create" || access.checks[0].Principal != actor {
+		t.Fatalf("release rights checks = %+v", access.checks)
+	}
+	if projects.calls != 1 || projects.check.Actor != actor || projects.check.Scope != scope || projects.check.ReleaseID != "release-1" || projects.check.DescriptorDigest != digest {
+		t.Fatalf("current release check = %+v calls=%d", projects.check, projects.calls)
+	}
+	projects.decision.Allowed = false
+	allowed, err = publisher.selectionStillAuthorized(context.Background(), job, input)
+	if err != nil || allowed {
+		t.Fatalf("withdrawn release authorization = %v, %v", allowed, err)
+	}
+	projects.err = errors.New("Projects unavailable")
+	allowed, err = publisher.selectionStillAuthorized(context.Background(), job, input)
+	if err == nil || allowed {
+		t.Fatalf("uncertain release authorization = %v, %v", allowed, err)
+	}
+	if len(access.checks) != 3 || access.checks[2].Operation != "generation.create" {
+		t.Fatalf("release publication checked an unexpected permission: %+v", access.checks)
+	}
+}
+
+func TestWorkingSelectionPublicationRequiresCurrentSourceRead(t *testing.T) {
+	actor := storagev1.Principal{Subject: "actor", Domain: "user"}
+	scope := storagev1.Scope{WorkspaceID: "workspace", ProjectID: "project"}
+	access := &selectionPublicationAccess{allow: true}
+	publisher := &Publisher{access: access}
+	job := generationv1.Job{JobID: "gen_job", Scope: scope, SourceSnapshotID: "snapshot-1"}
+	input := store.ExecutionInput{
+		Selection: &generationv1.RenderSelectionRequest{Scope: scope, SnapshotID: job.SourceSnapshotID},
+		Execution: &projectsv1.ResolvedExecution{Actor: actor, Scope: scope, SnapshotID: job.SourceSnapshotID},
+	}
+	allowed, err := publisher.selectionStillAuthorized(context.Background(), job, input)
+	if err != nil || !allowed {
+		t.Fatalf("working selection authorization = %v, %v", allowed, err)
+	}
+	if len(access.checks) != 2 || access.checks[0].Operation != "generation.create" || access.checks[1].Operation != "source.read" || access.checks[1].ObjectID != job.SourceSnapshotID {
+		t.Fatalf("working selection rights checks = %+v", access.checks)
+	}
 }
 
 type pinFixture struct{}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/Feruum/Leafrun/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 )
 
 // RuntimeConfig contains the common dependencies used by the Generation API
@@ -17,6 +18,8 @@ type RuntimeConfig struct {
 	StorageToken       string
 	AccessURL          string
 	AccessToken        string
+	ProjectsURL        string
+	ProjectsToken      string
 	OwnerCallbackToken string
 	Credentials        TokenResolver
 	EngineVersion      string
@@ -30,11 +33,15 @@ type Runtime struct {
 	Store      *store.Store
 	Access     *AccessClient
 	Pins       *PinClient
+	Projects   *projectsv1.Client
 	Server     *Server
 	Reconciler *Reconciler
 }
 
 func OpenRuntime(ctx context.Context, config RuntimeConfig) (*Runtime, error) {
+	if err := config.ValidateCredentialSeparation(); err != nil {
+		return nil, err
+	}
 	pool, state, err := OpenStore(ctx, config.DatabaseURL)
 	if err != nil {
 		return nil, err
@@ -51,8 +58,18 @@ func OpenRuntime(ctx context.Context, config RuntimeConfig) (*Runtime, error) {
 	if err != nil {
 		return closeOnError(errors.New("Generation Storage dependency configuration is invalid"))
 	}
+	var projects *projectsv1.Client
+	if (config.ProjectsURL == "") != (config.ProjectsToken == "") {
+		return closeOnError(errors.New("Generation Projects URL and token must be configured together"))
+	}
+	if config.ProjectsURL != "" {
+		projects, err = projectsv1.NewClient(config.ProjectsURL, config.ProjectsToken, nil)
+		if err != nil {
+			return closeOnError(errors.New("Generation Projects dependency configuration is invalid"))
+		}
+	}
 	server, err := New(state, state.Owner(), Config{
-		Credentials: config.Credentials, Access: access, Pins: pins,
+		Credentials: config.Credentials, Access: access, Pins: pins, Resources: pins, Projects: projects,
 		OwnerToken: config.OwnerCallbackToken, EngineVersion: config.EngineVersion,
 		Ready: func(ctx context.Context) error {
 			if err := state.Ready(ctx); err != nil {
@@ -71,7 +88,25 @@ func OpenRuntime(ctx context.Context, config RuntimeConfig) (*Runtime, error) {
 	if err != nil {
 		return closeOnError(err)
 	}
-	return &Runtime{Pool: pool, Store: state, Access: access, Pins: pins, Server: server, Reconciler: reconciler}, nil
+	return &Runtime{Pool: pool, Store: state, Access: access, Pins: pins, Projects: projects, Server: server, Reconciler: reconciler}, nil
+}
+
+// ValidateCredentialSeparation prevents a public bearer from obtaining the
+// fixed service authority used for owner assertions and privileged reads.
+// Check before opening any database or making a dependency request.
+func (config RuntimeConfig) ValidateCredentialSeparation() error {
+	if config.Credentials == nil {
+		return errors.New("Generation caller credentials are required")
+	}
+	for _, token := range []string{config.StorageToken, config.AccessToken, config.ProjectsToken, config.OwnerCallbackToken} {
+		if token == "" {
+			continue
+		}
+		if _, public := config.Credentials.ResolveToken(token); public {
+			return errors.New("public caller credentials must be distinct from service credentials")
+		}
+	}
+	return nil
 }
 
 // OpenStore constructs the database resources shared by standalone roles

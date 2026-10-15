@@ -19,8 +19,9 @@ import (
 
 type apiError struct {
 	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code    string                    `json:"code"`
+		Message string                    `json:"message"`
+		Fields  []generationv1.FieldError `json:"fields,omitempty"`
 	} `json:"error"`
 }
 
@@ -269,9 +270,14 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 }
 
 func writeAPIError(w http.ResponseWriter, status int, code, message string) {
+	writeAPIErrorFields(w, status, code, message, nil)
+}
+
+func writeAPIErrorFields(w http.ResponseWriter, status int, code, message string, fields []generationv1.FieldError) {
 	var response apiError
 	response.Error.Code = code
 	response.Error.Message = message
+	response.Error.Fields = fields
 	writeJSON(w, status, response)
 }
 

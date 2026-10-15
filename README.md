@@ -6,6 +6,10 @@ implementation uses the related Core, Contracts and Platform draft revisions;
 these dependencies remain unreleased. See [the E04 service guide](docs/e04-service.md)
 for roles, lifecycle, limits and verification.
 
+E05 adds [release and working-target selection](docs/e05-selection.md) through
+`POST /v1/renders`, with shared defaults, authorized uploaded files and frozen
+profiles. Projects owns immutable releases and current publication state.
+
 ## Server rendering
 
 The [Infra E04 stand](https://github.com/leafrun/leafrun-infra) builds the API,

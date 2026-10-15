@@ -83,6 +83,13 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, options Options
 			runErr = errors.Join(runErr, inputBundle.Close())
 		}
 	}()
+	stagedInputFiles := make(map[string]string)
+	if request.Execution != nil {
+		stagedInputFiles, err = stageInputFiles(ctx, decoder, workRoot, request.Execution.Prepared.Files)
+		if err != nil {
+			return fmt.Errorf("stage prepared input files: %w", err)
+		}
+	}
 	inputTerminalBytes, err := decoder.ReadBytes(renderwire.Terminal)
 	if err != nil {
 		return fmt.Errorf("read input terminal frame: %w", err)
@@ -124,7 +131,7 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, options Options
 		return fmt.Errorf("release imported input bundle: %w", err)
 	}
 	inputBundle = nil
-	if len(request.Parameters) > 0 {
+	if request.Execution == nil && len(request.Parameters) > 0 {
 		if err := parameters.Validate(ctx, base.FS(), request.ParametersSchemaPath, request.Parameters); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -144,7 +151,39 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, options Options
 		}
 	}()
 	renderSnapshot := base
-	if len(request.Parameters) > 0 {
+	pdfPath := filepath.Join(workRoot, "result.pdf")
+	renderOptions := documentcore.RenderSnapshotOptions{Entrypoint: request.Entrypoint, Output: pdfPath}
+	if request.Execution != nil {
+		descriptor, preparedSnapshot, prepareErr := prepareSelection(ctx, base, request, stagedInputFiles, workRoot)
+		if prepareErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if base != nil {
+				if closeErr := base.Close(); closeErr != nil {
+					return errors.Join(prepareErr, closeErr)
+				}
+				base = nil
+			}
+			var snapshotErr *documentcore.SnapshotError
+			if errors.As(prepareErr, &snapshotErr) && snapshotErr.Stage != documentcore.SnapshotStageValidate {
+				return fmt.Errorf("prepare frozen execution snapshot: %w", prepareErr)
+			}
+			return writeFailure(encoder, terminal, "validation", "prepared_input_invalid", "prepared input does not match the captured project", nil, "")
+		}
+		derived = preparedSnapshot
+		renderSnapshot = derived
+		renderOptions.Inputs = cloneStringMap(descriptor.ResolvedProfile.Inputs)
+		renderOptions.Inputs["leafrun-data"] = "/input.json"
+		renderOptions.PDFStandard = descriptor.ResolvedProfile.PDFStandard
+		if closeErr := base.Close(); closeErr != nil {
+			_ = derived.Close()
+			derived = nil
+			base = nil
+			return fmt.Errorf("release source snapshot before rendering: %w", closeErr)
+		}
+		base = nil
+	} else if len(request.Parameters) > 0 {
 		derived, err = documentcore.CreateInputSnapshot(ctx, base, request.Parameters, documentcore.CreateInputSnapshotOptions{TempDir: workRoot, Limits: snapshotLimits})
 		if err != nil {
 			if derived != nil {
@@ -190,8 +229,7 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, options Options
 		return writeFailure(encoder, terminal, "validation", "invalid_request", "entrypoint is not a captured regular file", nil, "")
 	}
 
-	pdfPath := filepath.Join(workRoot, "result.pdf")
-	renderResult, renderErr := documentcore.RenderSnapshot(ctx, renderSnapshot, documentcore.RenderSnapshotOptions{Entrypoint: request.Entrypoint, Output: pdfPath})
+	renderResult, renderErr := documentcore.RenderSnapshot(ctx, renderSnapshot, renderOptions)
 	if renderErr != nil {
 		var classified *documentcore.RenderError
 		if !errors.As(renderErr, &classified) || classified.Kind != documentcore.ErrorCompile {
@@ -271,6 +309,9 @@ func validateRequest(request renderwire.RenderRequest, manifest storagev1.Snapsh
 	}
 	if request.InputFingerprint == "" {
 		return errors.New("request fingerprint is required")
+	}
+	if request.Execution != nil {
+		return validateSelectionRequest(request, manifest)
 	}
 	job := generationv1.CreateJobRequest{
 		Scope: request.Scope, SnapshotID: request.SourceSnapshotID, TargetID: request.TargetID,

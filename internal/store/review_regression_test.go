@@ -11,7 +11,7 @@ import (
 )
 
 func TestPostgresPendingPinOwnerAndActivationOrdering(t *testing.T) {
-	s, _ := openStoreTest(t, Config{})
+	s, pool := openStoreTest(t, Config{})
 	a := admitTestJob(t, s, "pending-owner", "project", "user", "admit")
 	ctx := context.Background()
 	req := storagev1.AcquirePinRequest{Scope: a.Job.Scope, ObjectID: a.Job.SourceSnapshotID, HolderID: s.cfg.PinHolderID, HolderDomain: s.cfg.PinHolderDomain, RetentionPolicy: "ordinary", IdempotencyKey: "acquire"}
@@ -34,6 +34,133 @@ func TestPostgresPendingPinOwnerAndActivationOrdering(t *testing.T) {
 	pin.State = "active"
 	if err := s.MarkPinActiveAndRecordWorkflowStart(ctx, a.Job.JobID, req.IdempotencyKey, "render/"+a.Job.JobID, pin, workflow); err != nil {
 		t.Fatal(err)
+	}
+	foreignRequest := req
+	foreignRequest.Scope.WorkspaceID = "foreign-workspace"
+	requestBytes, err := json.Marshal(foreignRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignReceipt := pin
+	foreignReceipt.Scope = foreignRequest.Scope
+	receiptBytes, err := json.Marshal(foreignReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE generation_pin_acquires SET request=$3,response=$4::jsonb WHERE job_id=$1 AND idempotency_key=$2`, a.Job.JobID, req.IdempotencyKey, requestBytes, receiptBytes); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.Owner().Pin(ctx, storagev1.PinOwnerCheck{Scope: pin.Scope, PinID: pin.PinID, ObjectID: pin.ObjectID, HolderID: pin.HolderID, HolderDomain: pin.HolderDomain})
+	if err != nil || state != storagev1.OwnerAbsent {
+		t.Fatalf("foreign request and receipt scope was accepted: state=%s error=%v", state, err)
+	}
+}
+
+func TestPostgresLostSourcePinAcquireAckIsUnknownUntilReceiptAndExpiresWithJob(t *testing.T) {
+	s, pool := openStoreTest(t, Config{})
+	ctx := context.Background()
+	a := admitTestJob(t, s, "lost-source-ack", "project", "user", "admit")
+	request := storagev1.AcquirePinRequest{Scope: a.Job.Scope, ObjectID: a.Job.SourceSnapshotID, HolderID: s.cfg.PinHolderID, HolderDomain: s.cfg.PinHolderDomain, RetentionPolicy: "ordinary", IdempotencyKey: "source-lost-ack"}
+	if _, err := s.BeginPinAcquireIntent(ctx, PinAcquireIntent{JobID: a.Job.JobID, IdempotencyKey: request.IdempotencyKey, Request: request}); err != nil {
+		t.Fatal(err)
+	}
+	check := storagev1.PinOwnerCheck{Scope: request.Scope, PinID: "storage-pin-after-lost-ack", ObjectID: request.ObjectID, HolderID: request.HolderID, HolderDomain: request.HolderDomain}
+	state, err := s.Owner().Pin(ctx, check)
+	if err != nil || state != storagev1.OwnerUnknown {
+		t.Fatalf("lost source acquire acknowledgement: state=%s err=%v", state, err)
+	}
+
+	for name, changed := range map[string]storagev1.PinOwnerCheck{
+		"scope":         {Scope: storagev1.Scope{WorkspaceID: "other-workspace", ProjectID: check.Scope.ProjectID}, PinID: check.PinID, ObjectID: check.ObjectID, HolderID: check.HolderID, HolderDomain: check.HolderDomain},
+		"object":        {Scope: check.Scope, PinID: check.PinID, ObjectID: "other-snapshot", HolderID: check.HolderID, HolderDomain: check.HolderDomain},
+		"holder":        {Scope: check.Scope, PinID: check.PinID, ObjectID: check.ObjectID, HolderID: "other-holder", HolderDomain: check.HolderDomain},
+		"holder domain": {Scope: check.Scope, PinID: check.PinID, ObjectID: check.ObjectID, HolderID: check.HolderID, HolderDomain: "other-domain"},
+	} {
+		state, err = s.Owner().Pin(ctx, changed)
+		if err != nil || state != storagev1.OwnerAbsent {
+			t.Errorf("mismatched incoming %s was treated as uncertain: state=%s err=%v", name, state, err)
+		}
+	}
+
+	pin := storagev1.Pin{PinID: "storage-pin-after-lost-ack", Scope: request.Scope, ObjectID: request.ObjectID, HolderID: request.HolderID, HolderDomain: request.HolderDomain, RetentionPolicy: request.RetentionPolicy, State: "pending", CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err = s.RecordPinAcquireResponse(ctx, a.Job.JobID, request.IdempotencyKey, pin); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.Owner().Pin(ctx, check)
+	if err != nil || state != storagev1.OwnerReferenced {
+		t.Fatalf("recorded source pin receipt was not recognized: state=%s err=%v", state, err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE generation_jobs SET deadline=clock_timestamp()-interval '1 second' WHERE job_id=$1`, a.Job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.Owner().Pin(ctx, check)
+	if err != nil || state != storagev1.OwnerAbsent {
+		t.Fatalf("expired job retained source pin ownership: state=%s err=%v", state, err)
+	}
+}
+
+func TestPostgresPendingPinOwnerUnknownRequiresExactSavedRequest(t *testing.T) {
+	s, pool := openStoreTest(t, Config{})
+	ctx := context.Background()
+	a := admitTestJob(t, s, "pin-owner-mismatch", "project", "user", "admit")
+	request := storagev1.AcquirePinRequest{Scope: a.Job.Scope, ObjectID: a.Job.SourceSnapshotID, HolderID: s.cfg.PinHolderID, HolderDomain: s.cfg.PinHolderDomain, RetentionPolicy: "ordinary", IdempotencyKey: "saved-request"}
+	if _, err := s.BeginPinAcquireIntent(ctx, PinAcquireIntent{JobID: a.Job.JobID, IdempotencyKey: request.IdempotencyKey, Request: request}); err != nil {
+		t.Fatal(err)
+	}
+	check := storagev1.PinOwnerCheck{Scope: request.Scope, PinID: "uncertain-pin", ObjectID: request.ObjectID, HolderID: request.HolderID, HolderDomain: request.HolderDomain}
+	mutations := map[string]func(*storagev1.AcquirePinRequest){
+		"object":           func(r *storagev1.AcquirePinRequest) { r.ObjectID = "other-snapshot" },
+		"scope workspace":  func(r *storagev1.AcquirePinRequest) { r.Scope.WorkspaceID = "other-workspace" },
+		"scope project":    func(r *storagev1.AcquirePinRequest) { r.Scope.ProjectID = "other-project" },
+		"holder":           func(r *storagev1.AcquirePinRequest) { r.HolderID = "other-holder" },
+		"holder domain":    func(r *storagev1.AcquirePinRequest) { r.HolderDomain = "other-domain" },
+		"retention policy": func(r *storagev1.AcquirePinRequest) { r.RetentionPolicy = "generation-job" },
+		"idempotency key":  func(r *storagev1.AcquirePinRequest) { r.IdempotencyKey = "other-key" },
+	}
+	for name, mutate := range mutations {
+		changed := request
+		mutate(&changed)
+		encoded, err := json.Marshal(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `UPDATE generation_pin_acquires SET request=$3 WHERE job_id=$1 AND idempotency_key=$2`, a.Job.JobID, request.IdempotencyKey, encoded); err != nil {
+			t.Fatal(err)
+		}
+		state, ownerErr := s.Owner().Pin(ctx, check)
+		if ownerErr != nil || state != storagev1.OwnerAbsent {
+			t.Errorf("mismatched saved %s was treated as uncertain: state=%s err=%v", name, state, ownerErr)
+		}
+	}
+}
+
+func TestPostgresLostDerivedPinAcquireAckIsUnknownForLiveJob(t *testing.T) {
+	s, pool := openStoreTest(t, Config{})
+	ctx := context.Background()
+	a := admitTestJob(t, s, "lost-derived-ack", "project", "user", "admit")
+	activateTestPin(t, s, pool, a.Job)
+	attempt, err := s.ClaimExecution(ctx, ClaimAttemptInput{JobID: a.Job.JobID, CreateContainerIntentKey: "derived-create", StagingToken: "derived-stage", PrivateStagingPath: "/private/derived-stage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecordDerivedIdentity(ctx, a.Job.JobID, attempt.AttemptID, attempt.FencingEpoch, "derived-lost-ack", "derived-content"); err != nil {
+		t.Fatal(err)
+	}
+	request := storagev1.AcquirePinRequest{Scope: a.Job.Scope, ObjectID: "derived-lost-ack", HolderID: s.cfg.PinHolderID, HolderDomain: s.cfg.PinHolderDomain, RetentionPolicy: "ordinary", IdempotencyKey: "derived-lost-ack-key"}
+	if _, err = s.BeginPinAcquireIntent(ctx, PinAcquireIntent{JobID: a.Job.JobID, IdempotencyKey: request.IdempotencyKey, Request: request}); err != nil {
+		t.Fatal(err)
+	}
+	check := storagev1.PinOwnerCheck{Scope: request.Scope, PinID: "derived-storage-pin", ObjectID: request.ObjectID, HolderID: request.HolderID, HolderDomain: request.HolderDomain}
+	state, err := s.Owner().Pin(ctx, check)
+	if err != nil || state != storagev1.OwnerUnknown {
+		t.Fatalf("lost derived acquire acknowledgement: state=%s err=%v", state, err)
+	}
+	if canceled, cancelErr := s.RequestCancel(ctx, a.Job.JobID); cancelErr != nil || !canceled {
+		t.Fatalf("cancel after lost derived acknowledgement: canceled=%v err=%v", canceled, cancelErr)
+	}
+	state, err = s.Owner().Pin(ctx, check)
+	if err != nil || state != storagev1.OwnerAbsent {
+		t.Fatalf("terminal job retained uncertain derived pin ownership: state=%s err=%v", state, err)
 	}
 }
 

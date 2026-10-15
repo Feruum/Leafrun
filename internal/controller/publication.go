@@ -16,6 +16,7 @@ import (
 	"github.com/Feruum/Leafrun/internal/store"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	renderwire "github.com/leafrun/leafrun-contracts/renderwire/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 	"go.temporal.io/sdk/activity"
@@ -177,6 +178,13 @@ func (p *Publisher) Publish(ctx context.Context, jobID string) error {
 	if !allowed {
 		return p.state.FailPublication(publishCtx, lease.Owner, lease.Epoch, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
 	}
+	allowed, err = p.selectionStillAuthorized(publishCtx, job, input)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return p.state.FailPublication(publishCtx, lease.Owner, lease.Epoch, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
+	}
 	diagnostics, _ := json.Marshal(record.Terminal.Diagnostics)
 	if len(record.Terminal.Diagnostics) == 0 {
 		diagnostics = []byte("[]")
@@ -191,6 +199,33 @@ func (p *Publisher) Publish(ctx context.Context, jobID string) error {
 		}
 	}
 	return err
+}
+
+// selectionStillAuthorized rechecks the rights that admitted an E05 render at
+// the publication boundary. Release renders are authorized by the live
+// Projects release decision and generation.create; they do not require
+// source.read. Working renders require current generation.create and
+// source.read for the frozen source snapshot.
+func (p *Publisher) selectionStillAuthorized(ctx context.Context, job generationv1.Job, input store.ExecutionInput) (bool, error) {
+	if input.Execution == nil || input.Selection == nil {
+		return true, nil
+	}
+	principal := input.Execution.Actor
+	allowed, err := p.access.Check(ctx, storagev1.AccessCheck{Principal: principal, Scope: job.Scope, Operation: "generation.create"})
+	if err != nil || !allowed {
+		return allowed, err
+	}
+	if input.Selection.ReleaseID != "" {
+		if p.cfg.Projects == nil {
+			return false, errors.New("Projects release publication check is unavailable")
+		}
+		decision, checkErr := p.cfg.Projects.CurrentRelease(ctx, projectsv1.CurrentReleaseCheck{Actor: principal, Scope: job.Scope, ReleaseID: input.Execution.ReleaseID, DescriptorDigest: input.Execution.Descriptor.Digest})
+		if checkErr != nil {
+			return false, checkErr
+		}
+		return decision.Allowed, nil
+	}
+	return p.access.Check(ctx, storagev1.AccessCheck{Principal: principal, Scope: job.Scope, Operation: "source.read", ObjectID: job.SourceSnapshotID})
 }
 
 func (p *Publisher) heartbeatPublication(ctx context.Context, cancel context.CancelFunc, l store.PublicationLease) func() {

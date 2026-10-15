@@ -136,6 +136,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, string(sql)); err != nil {
 		return fmt.Errorf("apply generation migration: %w", err)
 	}
+	sql, err = fs.ReadFile(migrations, "migrations/002_e05_render_selection.sql")
+	if err != nil {
+		return fmt.Errorf("read Generation E05 migration: %w", err)
+	}
+	if _, err = s.pool.Exec(ctx, string(sql)); err != nil {
+		return fmt.Errorf("apply Generation E05 migration: %w", err)
+	}
 	return nil
 }
 

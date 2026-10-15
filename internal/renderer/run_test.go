@@ -6,18 +6,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"sort"
+	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/Feruum/Leafrun/internal/bundle"
-	"github.com/leafrun/leafrun-contracts/generation/v1"
+	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
+	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	renderwire "github.com/leafrun/leafrun-contracts/renderwire/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
+	documentcore "github.com/leafrun/leafrun-document-core"
 )
 
 func fixtureBundle(t *testing.T, source string) renderwire.Bundle {
@@ -55,6 +61,130 @@ func fixtureBundle(t *testing.T, source string) renderwire.Bundle {
 func fileEntry(name string, data []byte) storagev1.SnapshotFile {
 	sum := sha256.Sum256(data)
 	return storagev1.SnapshotFile{Path: name, Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}
+}
+
+func TestRunPreparedSelectionStreamsNestedFilesAndFrozenProfile(t *testing.T) {
+	if _, err := exec.LookPath("typst"); err != nil {
+		t.Skip("Typst 0.15.1 is not on PATH")
+	}
+	ctx := context.Background()
+	asset := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="navy"/></svg>`)
+	assetHash := sha256.Sum256(asset)
+	assetSHA := hex.EncodeToString(assetHash[:])
+	manifest := []byte(`{"formatVersion":1,"name":"Nested selection","engine":{"typstVersion":"0.15.1"},"templates":[{"id":"invoice","entrypoint":"templates/main.typ","inputSchema":"schema.json"}],"targets":[{"id":"invoice","kind":"document","template":"invoice","output":{"format":"pdf","path":"invoice.pdf"}}],"profiles":{"production":{"inputs":{"theme":"blue"},"pdfStandard":"a-2b"}},"defaultProfile":"production"}`)
+	main := []byte(`#let data = json(sys.inputs.at("leafrun-data"))
+#assert(sys.inputs.at("theme") == "blue")
+#image(data.logo, width: 1cm)
+= #sys.inputs.at("theme")
+`)
+	schema := []byte(`{"type":"object","properties":{"logo":{"type":"string","x-leafrun-file":true}},"required":["logo"]}`)
+	source := selectionFixtureBundle(t, map[string][]byte{"leafrun.json": manifest, "schema.json": schema, "templates/main.typ": main})
+	base, err := documentcore.RestoreSnapshot(ctx, toCoreBundle(source), documentcore.RestoreSnapshotOptions{TempDir: t.TempDir(), Limits: snapshotLimits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	project, err := documentcore.ReadProject(ctx, base.FS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := documentcore.DescribeTarget(ctx, base.FS(), project, base.Manifest(), "invoice", "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := documentcore.PrepareParameters(ctx, base.FS(), descriptor.InputSchema, []byte(`{}`), []documentcore.FileRef{{Pointer: "/logo", ResourceID: "resource_logo", Filename: "logo.svg", SHA256: assetSHA, SizeBytes: int64(len(asset))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Inputs["theme"] = "blue"
+	preparedBytes, err := json.Marshal(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frozen projectsv1.PreparedInput
+	if err = jsonvalue.Unmarshal(preparedBytes, &frozen, projectsv1.ResponseLimit); err != nil {
+		t.Fatal(err)
+	}
+	request := renderwire.RenderRequest{
+		Scope: storagev1.Scope{WorkspaceID: "workspace_1", ProjectID: "project_1"}, JobID: "job_selection", AttemptID: "attempt_selection",
+		TargetID: descriptor.TargetID, Entrypoint: descriptor.Entrypoint, SourceSnapshotID: "snapshot_selection", SourceContentID: source.Manifest.ID,
+		InputFingerprint: strings.Repeat("d", 64), Parameters: frozen.JSON, ParametersSchemaPath: descriptor.InputSchema,
+		Execution: &renderwire.ExecutionInput{DescriptorDigest: descriptor.Digest, ExecutionDigest: descriptor.ExecutionDigest, Profile: descriptor.SelectedProfile, Prepared: frozen},
+	}
+	var input bytes.Buffer
+	encoder := renderwire.NewEncoder(&input, renderwire.InputLimit)
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = encoder.WriteBytes(renderwire.Request, requestBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err = renderwire.WriteBundle(encoder, source); err != nil {
+		t.Fatal(err)
+	}
+	if err = renderwire.WriteInputFiles(encoder, frozen.Files, func(file projectsv1.PreparedFile) (io.ReadCloser, error) {
+		if file.ResourceID != "resource_logo" {
+			return nil, fmt.Errorf("unexpected resource %q", file.ResourceID)
+		}
+		return io.NopCloser(bytes.NewReader(asset)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = encoder.WriteBytes(renderwire.Terminal, []byte(`{"complete":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	var output bytes.Buffer
+	if err = Run(ctx, &input, &output, Options{WorkDir: workDir}); err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeOutput(t, output.Bytes(), workDir)
+	if decoded.derived != nil {
+		defer decoded.derived.Close()
+	}
+	if !decoded.terminal.Success || decoded.pdf == nil || decoded.derived == nil {
+		t.Fatalf("prepared selection did not render successfully: %+v", decoded.terminal)
+	}
+	if decoded.terminal.InputFingerprint != request.InputFingerprint || decoded.terminal.SourceSnapshotID != request.SourceSnapshotID {
+		t.Fatalf("terminal lost frozen request identity: %+v", decoded.terminal)
+	}
+	derivedFS := decoded.derived.ProjectFS()
+	storedJSON, err := fs.ReadFile(derivedFS, "input.json")
+	if err != nil || !bytes.Equal(storedJSON, frozen.JSON) {
+		t.Fatalf("prepared JSON changed in derived snapshot: %s, %v", storedJSON, err)
+	}
+	storedAsset, err := fs.ReadFile(derivedFS, frozen.Files[0].Path)
+	if err != nil || !bytes.Equal(storedAsset, asset) {
+		t.Fatalf("verified file bytes missing at %q: %v", frozen.Files[0].Path, err)
+	}
+}
+
+func selectionFixtureBundle(t *testing.T, contents map[string][]byte) renderwire.Bundle {
+	t.Helper()
+	manifest := storagev1.SnapshotManifest{FormatVersion: 1, Origin: storagev1.SourceOrigin{Kind: "folder", Location: "captured"}, Files: []storagev1.SnapshotFile{}, Directories: []string{}, Fonts: []storagev1.SnapshotFont{}}
+	project := fstest.MapFS{}
+	directories := map[string]bool{}
+	for name, data := range contents {
+		project[name] = &fstest.MapFile{Data: bytes.Clone(data)}
+		manifest.Files = append(manifest.Files, fileEntry(name, data))
+		parent := path.Dir(name)
+		for parent != "." {
+			directories[parent] = true
+			parent = path.Dir(parent)
+		}
+	}
+	for directory := range directories {
+		manifest.Directories = append(manifest.Directories, directory)
+	}
+	sort.Strings(manifest.Directories)
+	sort.Slice(manifest.Files, func(i, j int) bool { return manifest.Files[i].Path < manifest.Files[j].Path })
+	id, err := storagev1.ManifestContentID(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ID = id
+	return renderwire.Bundle{Manifest: manifest, ProjectFS: project}
 }
 
 func requestFor(t *testing.T, manifest storagev1.SnapshotManifest, parameters []byte, schema string) renderwire.RenderRequest {

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
+	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 )
 
@@ -23,17 +24,44 @@ const (
 // parameter bytes. The store validates that the request fingerprint is the
 // Contracts generation/v1 fingerprint before it persists either byte slice.
 type AdmitInput struct {
-	WorkspaceID       string
-	ProjectID         string
-	InitiatorID       string
-	IdempotencyKey    string
-	NormalizedRequest []byte
-	Parameters        []byte
-	Fingerprint       string
-	EngineVersion     string
-	SnapshotID        string
-	TargetID          string
-	Entrypoint        string
+	WorkspaceID          string
+	ProjectID            string
+	InitiatorID          string
+	Actor                storagev1.Principal
+	IdempotencyKey       string
+	NormalizedRequest    []byte
+	Parameters           []byte
+	Fingerprint          string
+	SelectionRequest     []byte
+	SelectionFingerprint string
+	ResolvedExecution    *projectsv1.ResolvedExecution
+	InputResources       []InputResourceIntent
+	EngineVersion        string
+	SnapshotID           string
+	SourceContentID      string
+	TargetID             string
+	Entrypoint           string
+}
+
+// InputResourceIntent binds a canonical prepared file to the one durable pin
+// acquisition shared by all fields that reference the same Storage object.
+type InputResourceIntent struct {
+	Resource       projectsv1.InputResource
+	AcquisitionKey string
+}
+
+type InputPinAcquire struct {
+	Resource       projectsv1.InputResource
+	AcquisitionKey string
+	PinID          string
+	State          string
+}
+
+type PinnedInputResource struct {
+	Resource       projectsv1.InputResource
+	AcquisitionKey string
+	PinID          string
+	State          string
 }
 
 type PinAcquireIntent struct {

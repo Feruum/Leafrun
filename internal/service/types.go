@@ -54,6 +54,8 @@ type Config struct {
 	Credentials   TokenResolver
 	Access        AccessChecker
 	Pins          PinStorage
+	Resources     ResourceMetadataReader
+	Projects      ProjectsClient
 	OwnerToken    string
 	EngineVersion string
 	// Ready must verify the durable dependencies required to serve requests.
@@ -68,6 +70,9 @@ func (c Config) validate() error {
 	}
 	if c.EngineVersion != "0.15.1" {
 		return errors.New("Generation requires the pinned Typst engine version 0.15.1")
+	}
+	if _, public := c.Credentials.ResolveToken(c.OwnerToken); public {
+		return errors.New("public caller credentials must be distinct from service credentials")
 	}
 	return nil
 }

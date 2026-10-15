@@ -134,6 +134,7 @@ func (s *testStore) Retain(context.Context) (store.RetentionResult, error) {
 type testAccess struct {
 	mu      sync.Mutex
 	allowed bool
+	denied  map[string]bool
 	calls   []storagev1.AccessCheck
 }
 
@@ -141,7 +142,7 @@ func (a *testAccess) Check(_ context.Context, check storagev1.AccessCheck) (bool
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls = append(a.calls, check)
-	return a.allowed, nil
+	return a.allowed && !a.denied[check.Operation], nil
 }
 
 type testOwner struct{}
@@ -154,15 +155,18 @@ func (testOwner) Pin(context.Context, storagev1.PinOwnerCheck) (storagev1.OwnerS
 }
 
 type testPins struct {
-	mu            sync.Mutex
-	acquireKeys   []string
-	known         map[string]storagev1.Pin
-	loseFirstAck  bool
-	expireFirst   bool
-	activateCalls int
-	snapshot      storagev1.Snapshot
-	snapshotErr   error
-	snapshotCalls int
+	mu                sync.Mutex
+	acquireKeys       []string
+	known             map[string]storagev1.Pin
+	loseFirstAck      bool
+	expireFirst       bool
+	acquireFirstError error
+	activateCalls     int
+	activatedObjects  []string
+	beforeActivate    func(storagev1.Pin) error
+	snapshot          storagev1.Snapshot
+	snapshotErr       error
+	snapshotCalls     int
 }
 
 func (p *testPins) GetSnapshot(_ context.Context, snapshotID string) (storagev1.Snapshot, error) {
@@ -182,8 +186,11 @@ func (p *testPins) AcquirePin(_ context.Context, request storagev1.AcquirePinReq
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.acquireKeys = append(p.acquireKeys, request.IdempotencyKey)
+	if p.acquireFirstError != nil && len(p.acquireKeys) == 1 {
+		return storagev1.Pin{}, p.acquireFirstError
+	}
 	if p.expireFirst && len(p.acquireKeys) == 1 {
-		return storagev1.Pin{}, &HTTPStatusError{StatusCode: http.StatusGone}
+		return storagev1.Pin{}, &HTTPStatusError{StatusCode: http.StatusConflict, Code: "pin_expired"}
 	}
 	if pin, ok := p.known[request.IdempotencyKey]; ok {
 		return pin, nil
@@ -214,11 +221,17 @@ func (p *testPins) ActivatePin(_ context.Context, pinID string) (storagev1.Pin, 
 	p.activateCalls++
 	for key, pin := range p.known {
 		if pin.PinID == pinID {
+			if p.beforeActivate != nil {
+				if err := p.beforeActivate(pin); err != nil {
+					return storagev1.Pin{}, err
+				}
+			}
 			if !time.Now().Before(pin.ExpiresAt) {
 				return storagev1.Pin{}, &HTTPStatusError{StatusCode: http.StatusConflict, Code: "pin_expired"}
 			}
 			pin.State = "active"
 			p.known[key] = pin
+			p.activatedObjects = append(p.activatedObjects, pin.ObjectID)
 			return pin, nil
 		}
 	}
@@ -315,7 +328,7 @@ func TestCreateKeepsSamePinKeyWhenAcquireAcknowledgementIsLost(t *testing.T) {
 	}
 }
 
-func TestCreateRotatesStorageKeyOnlyAfterAuthoritativeGone(t *testing.T) {
+func TestCreateRotatesStorageKeyOnlyAfterTypedPinExpiry(t *testing.T) {
 	s := newTestStore()
 	access := &testAccess{allowed: true}
 	pins := &testPins{expireFirst: true}
@@ -326,10 +339,10 @@ func TestCreateRotatesStorageKeyOnlyAfterAuthoritativeGone(t *testing.T) {
 		t.Fatalf("POST status = %d, body %s", response.Code, response.Body)
 	}
 	if len(pins.acquireKeys) != 2 || pins.acquireKeys[0] == pins.acquireKeys[1] {
-		t.Fatalf("410 did not create a new durable Storage key: %v", pins.acquireKeys)
+		t.Fatalf("typed pin expiry did not create a new durable Storage key: %v", pins.acquireKeys)
 	}
 	if len(s.expiredKeys) != 1 || s.expiredKeys[0] != pins.acquireKeys[0] {
-		t.Fatalf("410 was not durably recorded before rotation: expired=%v keys=%v", s.expiredKeys, pins.acquireKeys)
+		t.Fatalf("typed pin expiry was not durably recorded before rotation: expired=%v keys=%v", s.expiredKeys, pins.acquireKeys)
 	}
 }
 
