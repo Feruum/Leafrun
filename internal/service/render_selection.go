@@ -110,6 +110,19 @@ func (s *Server) createRender(w http.ResponseWriter, r *http.Request) {
 		SnapshotID: resolved.SnapshotID, SourceContentID: resolved.ContentID,
 		TargetID: resolved.Descriptor.TargetID, Entrypoint: resolved.Descriptor.Entrypoint,
 	}
+	if selection.ReleaseID != "" {
+		decision, checkErr := s.cfg.Projects.CurrentRelease(r.Context(), projectsv1.CurrentReleaseCheck{
+			Actor: principal, Scope: resolved.Scope, ReleaseID: resolved.ReleaseID, DescriptorDigest: resolved.Descriptor.Digest,
+		})
+		if checkErr != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "projects_unavailable", "Release checks are temporarily unavailable")
+			return
+		}
+		if !decision.Allowed {
+			writeAPIError(w, http.StatusConflict, "selection_conflict", "The selected project state changed")
+			return
+		}
+	}
 	admission, _, err := s.store.Admit(r.Context(), input)
 	if err != nil {
 		s.writeStoreError(w, err)

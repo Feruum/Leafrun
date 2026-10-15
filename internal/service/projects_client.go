@@ -8,7 +8,8 @@ import (
 )
 
 // ProjectsClient is the fixed-credential owner surface used to resolve fresh
-// render selections and to recheck a release immediately before publication.
+// render selections and to recheck a release immediately before admission and
+// publication.
 type ProjectsClient interface {
 	Resolve(context.Context, projectsv1.ResolveRequest) (projectsv1.ResolvedExecution, error)
 	CurrentRelease(context.Context, projectsv1.CurrentReleaseCheck) (projectsv1.CurrentReleaseDecision, error)

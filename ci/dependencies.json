@@ -1,11 +1,11 @@
 {
   "core": {
     "repository": "Feruum/leafrun-document-core",
-    "ref": "7d3d18019d05e8baee35bc334b3cb87b9bfaefbd"
+    "ref": "9c0ee0b3d12585fb5a886a5b1303297a38ad9d9e"
   },
   "contracts": {
     "repository": "Feruum/leafrun-contracts",
-    "ref": "5fc1570d770ab680a639bc5a93ff0ba0946b4d9a"
+    "ref": "de87e4fc3a339d139155112f17357fdb0aaa7845"
   },
   "platform": {
     "repository": "Feruum/leafrun-platform",

@@ -53,10 +53,12 @@ func TestPublicRoutesRejectCallerSuppliedResourceMetadata(t *testing.T) {
 }
 
 type selectionProjects struct {
-	execution   projectsv1.ResolvedExecution
-	resolveErr  error
-	resolveCall int
-	current     projectsv1.CurrentReleaseDecision
+	execution     projectsv1.ResolvedExecution
+	resolveErr    error
+	resolveCall   int
+	current       projectsv1.CurrentReleaseDecision
+	currentErr    error
+	currentChecks []projectsv1.CurrentReleaseCheck
 }
 
 func (p *selectionProjects) Resolve(_ context.Context, request projectsv1.ResolveRequest) (projectsv1.ResolvedExecution, error) {
@@ -67,8 +69,9 @@ func (p *selectionProjects) Resolve(_ context.Context, request projectsv1.Resolv
 	return p.execution, nil
 }
 
-func (p *selectionProjects) CurrentRelease(context.Context, projectsv1.CurrentReleaseCheck) (projectsv1.CurrentReleaseDecision, error) {
-	return p.current, nil
+func (p *selectionProjects) CurrentRelease(_ context.Context, check projectsv1.CurrentReleaseCheck) (projectsv1.CurrentReleaseDecision, error) {
+	p.currentChecks = append(p.currentChecks, check)
+	return p.current, p.currentErr
 }
 
 type selectionResources map[string]storagev1.Resource
@@ -96,7 +99,7 @@ func TestRenderSelectionReplayUsesOriginalReceiptAndResourcePinsPrecedeWorkflow(
 	}
 	principal := storagev1.Principal{Subject: "user-1", Domain: "core"}
 	resolved := validResolvedSelection(t, selection, selectionFingerprint, principal)
-	projects := &selectionProjects{execution: resolved}
+	projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	resource := storagev1.Resource{ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: resolved.Prepared.Files[0].SHA256, SizeBytes: resolved.Prepared.Files[0].SizeBytes, CreatedAt: time.Now()}
 	server, err := New(state, state.Owner(), Config{
 		Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: selectionResources{"resource-file": resource}, Projects: projects,
@@ -192,7 +195,7 @@ func TestTerminalRenderSelectionReplayReturnsSavedAdmissionWithoutPinRecovery(t 
 		t.Fatal(err)
 	}
 	principal := storagev1.Principal{Subject: "user-1", Domain: "core"}
-	projects := &selectionProjects{execution: validResolvedSelection(t, selection, fingerprint, principal)}
+	projects := &selectionProjects{execution: validResolvedSelection(t, selection, fingerprint, principal), current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +273,7 @@ func TestRenderSelectionRecoversLostInputPinAcquireAcknowledgementAfterRestart(t
 	principal := storagev1.Principal{Subject: "user-1", Domain: "core"}
 	resolved := validResolvedSelection(t, selection, fingerprint, principal)
 	file := resolved.Prepared.Files[0]
-	projects := &selectionProjects{execution: resolved}
+	projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	resources := selectionResources{"resource-file": {ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: file.SHA256, SizeBytes: file.SizeBytes, CreatedAt: time.Now()}}
 	newServer := func() *Server {
 		server, newErr := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
@@ -320,7 +323,7 @@ func TestRenderSelectionRotatesInputPinKeyOnlyForTypedExpiry(t *testing.T) {
 	principal := storagev1.Principal{Subject: "user-1", Domain: "core"}
 	resolved := validResolvedSelection(t, selection, fingerprint, principal)
 	file := resolved.Prepared.Files[0]
-	projects := &selectionProjects{execution: resolved}
+	projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	resources := selectionResources{"resource-file": {ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: file.SHA256, SizeBytes: file.SizeBytes, CreatedAt: time.Now()}}
 	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
@@ -350,7 +353,7 @@ func TestExpiredInputResourceDoesNotRotatePinOrStartWorkflow(t *testing.T) {
 	resolved := validResolvedSelection(t, selection, fingerprint, principal)
 	file := resolved.Prepared.Files[0]
 	resources := selectionResources{"resource-file": {ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: file.SHA256, SizeBytes: file.SizeBytes}}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: &selectionProjects{execution: resolved}, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
