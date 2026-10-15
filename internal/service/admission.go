@@ -357,7 +357,7 @@ func validatePin(request storagev1.AcquirePinRequest, pin storagev1.Pin) error {
 
 func isExpiredPinError(err error) bool {
 	var response *HTTPStatusError
-	return errors.As(err, &response) && (response.StatusCode == http.StatusGone || response.StatusCode == http.StatusConflict && response.Code == "pin_expired")
+	return errors.As(err, &response) && response.StatusCode == http.StatusConflict && response.Code == "pin_expired"
 }
 
 func isHTTPStatus(err error, status int) bool {
