@@ -214,6 +214,9 @@ func (p *testPins) ActivatePin(_ context.Context, pinID string) (storagev1.Pin, 
 	p.activateCalls++
 	for key, pin := range p.known {
 		if pin.PinID == pinID {
+			if !time.Now().Before(pin.ExpiresAt) {
+				return storagev1.Pin{}, &HTTPStatusError{StatusCode: http.StatusConflict, Code: "pin_expired"}
+			}
 			pin.State = "active"
 			p.known[key] = pin
 			return pin, nil
@@ -353,8 +356,47 @@ func TestRecoveredExpiredPendingPinRotatesForSourceAndDerivedSnapshots(t *testin
 			if err != nil {
 				t.Fatalf("expired pending pin blocked recovery: %v", err)
 			}
-			if len(state.expiredKeys) != 1 || state.expiredKeys[0] != "old-key" || len(pins.acquireKeys) != 1 || pins.acquireKeys[0] == "old-key" || pins.activateCalls != 1 {
+			if len(state.expiredKeys) != 1 || state.expiredKeys[0] != "old-key" || len(pins.acquireKeys) != 1 || pins.acquireKeys[0] == "old-key" || pins.activateCalls != 2 {
 				t.Fatalf("rotation did not persist expiry and activate a fresh key: expired=%v keys=%v activations=%d", state.expiredKeys, pins.acquireKeys, pins.activateCalls)
+			}
+		})
+	}
+}
+
+func TestPinExpiryUsesStorageClockInsteadOfAPISystemClock(t *testing.T) {
+	for _, source := range []bool{true, false} {
+		t.Run(fmt.Sprintf("source=%v", source), func(t *testing.T) {
+			state := newTestStore()
+			objectID := state.job.SourceSnapshotID
+			if !source {
+				objectID = "snap-derived"
+				state.job.Status = generationv1.Preparing
+				state.job.DerivedSnapshotID = objectID
+			}
+			pins := &testPins{}
+			apiNow := time.Now().Add(2 * time.Hour)
+			server, err := New(state, testOwner{}, Config{
+				Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
+				Access:      &testAccess{allowed: true}, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
+				Now: func() time.Time { return apiNow },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if source {
+				err = server.EnsureSourcePin(context.Background(), state.job)
+			} else {
+				err = server.EnsureDerivedPin(context.Background(), state.job, objectID)
+			}
+			if err != nil {
+				t.Fatalf("live Storage pin was rejected using the API clock: %v", err)
+			}
+			if len(state.expiredKeys) != 0 || len(pins.acquireKeys) != 1 || pins.activateCalls != 1 {
+				t.Fatalf("live pin was expired or rotated: expired=%v keys=%v activations=%d", state.expiredKeys, pins.acquireKeys, pins.activateCalls)
+			}
+			if source && (!state.active || state.marked != 1) {
+				t.Fatalf("source pin/workflow intent was not activated: active=%v marked=%d", state.active, state.marked)
 			}
 		})
 	}
@@ -364,6 +406,63 @@ type conflictPins struct {
 	*testPins
 	acquireConflict, activateConflict bool
 	code                              string
+}
+
+type activationResponsePins struct {
+	*testPins
+	responseErr error
+}
+
+func (p *activationResponsePins) ActivatePin(ctx context.Context, id string) (storagev1.Pin, error) {
+	_, err := p.testPins.ActivatePin(ctx, id)
+	if err != nil {
+		return storagev1.Pin{}, err
+	}
+	return storagev1.Pin{}, p.responseErr
+}
+
+func TestPinKnownActivationRejectionCannotBeOverriddenByActiveMetadata(t *testing.T) {
+	for _, source := range []bool{true, false} {
+		for _, tc := range []struct {
+			name   string
+			err    error
+			accept bool
+		}{
+			{"owner_absent", &HTTPStatusError{StatusCode: http.StatusConflict, Code: "owner_absent"}, false},
+			{"forbidden", &HTTPStatusError{StatusCode: http.StatusForbidden}, false},
+			{"owner_unknown", &HTTPStatusError{StatusCode: http.StatusServiceUnavailable}, false},
+			{"lost_response", errors.New("lost activation reply"), true},
+		} {
+			t.Run(fmt.Sprintf("source=%v/%s", source, tc.name), func(t *testing.T) {
+				state := newTestStore()
+				objectID := state.job.SourceSnapshotID
+				if !source {
+					objectID = "snap-derived"
+					state.job.Status = generationv1.Preparing
+					state.job.DerivedSnapshotID = objectID
+				}
+				pins := &activationResponsePins{testPins: &testPins{}, responseErr: tc.err}
+				server, err := New(state, testOwner{}, Config{
+					Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
+					Access:      &testAccess{allowed: true}, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if source {
+					err = server.EnsureSourcePin(context.Background(), state.job)
+				} else {
+					err = server.EnsureDerivedPin(context.Background(), state.job, objectID)
+				}
+				if (err == nil) != tc.accept {
+					t.Fatalf("accept=%v: active metadata overrode a definitive rejection or lost reply recovery failed: %v", tc.accept, err)
+				}
+				if len(state.expiredKeys) != 0 || len(pins.acquireKeys) != 1 || !tc.accept && state.marked != 0 {
+					t.Fatalf("rejection changed durable pin state: expired=%v keys=%v marked=%d", state.expiredKeys, pins.acquireKeys, state.marked)
+				}
+			})
+		}
+	}
 }
 
 func (p *conflictPins) AcquirePin(ctx context.Context, request storagev1.AcquirePinRequest) (storagev1.Pin, error) {

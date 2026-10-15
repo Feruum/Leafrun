@@ -330,12 +330,13 @@ func enqueuePinRelease(ctx context.Context, tx pgx.Tx, jobID string, pin storage
 		return nil
 	}
 	req, err := json.Marshal(struct {
-		Scope        storagev1.Scope `json:"scope"`
-		PinID        string          `json:"pinId"`
-		ObjectID     string          `json:"objectId"`
-		HolderID     string          `json:"holderId"`
-		HolderDomain string          `json:"holderDomain"`
-	}{pin.Scope, pin.PinID, pin.ObjectID, pin.HolderID, pin.HolderDomain})
+		Scope           storagev1.Scope `json:"scope"`
+		PinID           string          `json:"pinId"`
+		ObjectID        string          `json:"objectId"`
+		HolderID        string          `json:"holderId"`
+		HolderDomain    string          `json:"holderDomain"`
+		RetentionPolicy string          `json:"retentionPolicy"`
+	}{pin.Scope, pin.PinID, pin.ObjectID, pin.HolderID, pin.HolderDomain, pin.RetentionPolicy})
 	if err != nil {
 		return err
 	}

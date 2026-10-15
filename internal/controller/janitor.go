@@ -15,6 +15,7 @@ import (
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	renderwire "github.com/leafrun/leafrun-contracts/renderwire/v1"
+	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 )
 
 const (
@@ -407,22 +408,43 @@ func (j *Janitor) runCleanup(ctx context.Context) error {
 		switch intent.Kind {
 		case "pin.release":
 			var request struct {
-				PinID        string `json:"pinId"`
-				ObjectID     string `json:"objectId"`
-				HolderID     string `json:"holderId"`
-				HolderDomain string `json:"holderDomain"`
+				Scope           storagev1.Scope `json:"scope"`
+				PinID           string          `json:"pinId"`
+				ObjectID        string          `json:"objectId"`
+				HolderID        string          `json:"holderId"`
+				HolderDomain    string          `json:"holderDomain"`
+				RetentionPolicy string          `json:"retentionPolicy,omitempty"`
 			}
 			prefix, pinID, ok := strings.Cut(intent.IdempotencyKey, "/")
 			if !ok || prefix != "release" || pinID == "" || strings.Contains(pinID, "/") || jsonvalue.Unmarshal(intent.Request, &request, 1<<20) != nil || request.PinID != pinID || request.ObjectID == "" || request.HolderID == "" || request.HolderDomain == "" {
 				return errors.New("pin release intent is invalid")
 			}
+			job, getErr := j.state.GetJob(ctx, intent.JobID)
+			if getErr != nil || request.Scope != job.Scope {
+				return errors.New("pin release job scope is unavailable")
+			}
+			// Older Generation intents predate this field and could only own
+			// ordinary pins. New producers persist the exact retention policy.
+			if request.RetentionPolicy == "" {
+				request.RetentionPolicy = "ordinary"
+			}
+			if request.RetentionPolicy != "ordinary" && request.RetentionPolicy != "release" && request.RetentionPolicy != "recovery" {
+				return errors.New("pin release retention policy is invalid")
+			}
+			binding := storagev1.PinReleaseRequest{Scope: job.Scope, ObjectID: request.ObjectID, HolderID: request.HolderID, HolderDomain: request.HolderDomain, RetentionPolicy: request.RetentionPolicy}
 			callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			err = j.storage.ReleasePin(callCtx, pinID)
+			result, releaseErr := j.storage.ReleasePinBound(callCtx, pinID, binding)
 			cancel()
-			if err != nil {
+			if releaseErr != nil {
 				return errors.New("Storage pin release is pending")
 			}
-			receipt = []byte(`{"released":true}`)
+			if result.PinID != pinID || result.Binding != binding || result.State != storagev1.PinReleaseReleased && result.State != storagev1.PinReleaseAbsent {
+				return errors.New("Storage pin release receipt has mismatched bindings")
+			}
+			receipt, err = json.Marshal(result)
+			if err != nil {
+				return err
+			}
 		case "attempt.files":
 			var request struct {
 				StagingToken string `json:"stagingToken"`

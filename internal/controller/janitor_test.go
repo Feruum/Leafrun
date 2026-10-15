@@ -12,7 +12,170 @@ import (
 
 	"github.com/Feruum/Leafrun/internal/sandbox"
 	"github.com/Feruum/Leafrun/internal/store"
+	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 )
+
+func TestJanitorTreatsMissingPinAsCompletedAndContinuesCleanup(t *testing.T) {
+	s, pool := privateStore(t)
+	job := queuedRuntimeJob(t, s)
+	for _, pinID := range []string{"pin-already-gone", "pin-still-present"} {
+		request, _ := json.Marshal(struct {
+			Scope        storagev1.Scope `json:"scope"`
+			PinID        string          `json:"pinId"`
+			ObjectID     string          `json:"objectId"`
+			HolderID     string          `json:"holderId"`
+			HolderDomain string          `json:"holderDomain"`
+		}{job.Scope, pinID, "snapshot", "leafrun-generation", "service"})
+		if _, err := pool.Exec(context.Background(), `INSERT INTO generation_cleanup_intents(job_id,kind,idempotency_key,request,state,not_before) VALUES($1,'pin.release',$2,$3,'pending',clock_timestamp())`, job.JobID, "release/"+pinID, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	storage := newRuntimeStorage(job)
+	storage.releaseStates = []storagev1.PinReleaseState{storagev1.PinReleaseAbsent}
+	root := t.TempDir()
+	janitor, err := NewJanitor(s, storage, newRuntimeEngine(job, sandbox.State{}), Config{StagingRoot: root, OwnerID: "missing-pin-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = janitor.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var complete int
+	if err = pool.QueryRow(context.Background(), `SELECT count(*) FROM generation_cleanup_intents WHERE job_id=$1 AND kind='pin.release' AND state='complete'`, job.JobID).Scan(&complete); err != nil {
+		t.Fatal(err)
+	}
+	if complete != 2 || len(storage.releasedPins) != 2 || storage.releasedPins[0] != "pin-already-gone" || storage.releasedPins[1] != "pin-still-present" {
+		t.Fatalf("missing pin blocked subsequent cleanup: complete=%d released=%v", complete, storage.releasedPins)
+	}
+}
+
+func TestJanitorCleansDurableTerminalPinIntent(t *testing.T) {
+	s, pool := privateStore(t)
+	job := queuedRuntimeJob(t, s)
+	if _, err := s.RequestCancel(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	// Eligibility is a separate retention policy; exercise the actual persisted
+	// terminal producer payload without waiting for the retention interval.
+	if _, err := pool.Exec(context.Background(), `UPDATE generation_cleanup_intents SET not_before=clock_timestamp() WHERE job_id=$1 AND kind='pin.release'`, job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	storage := newRuntimeStorage(job)
+	janitor, err := NewJanitor(s, storage, newRuntimeEngine(job, sandbox.State{}), Config{StagingRoot: t.TempDir(), OwnerID: "terminal-pin-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = janitor.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var complete int
+	if err = pool.QueryRow(context.Background(), `SELECT count(*) FROM generation_cleanup_intents WHERE job_id=$1 AND kind='pin.release' AND state='complete'`, job.JobID).Scan(&complete); err != nil {
+		t.Fatal(err)
+	}
+	if complete != 1 || len(storage.releasedPins) != 1 || storage.releasedPins[0] != "runtime-pin" {
+		t.Fatalf("terminal cleanup was not executed: complete=%d released=%v", complete, storage.releasedPins)
+	}
+}
+
+func TestJanitorRejectsForeignScopePinIntent(t *testing.T) {
+	s, pool := privateStore(t)
+	job := queuedRuntimeJob(t, s)
+	foreign := job.Scope
+	foreign.ProjectID = "foreign-project"
+	request, _ := json.Marshal(map[string]any{"scope": foreign, "pinId": "pin-foreign", "objectId": "snapshot", "holderId": "leafrun-generation", "holderDomain": "service"})
+	if _, err := pool.Exec(context.Background(), `INSERT INTO generation_cleanup_intents(job_id,kind,idempotency_key,request,state,not_before) VALUES($1,'pin.release','release/pin-foreign',$2,'pending',clock_timestamp())`, job.JobID, request); err != nil {
+		t.Fatal(err)
+	}
+	storage := newRuntimeStorage(job)
+	janitor, err := NewJanitor(s, storage, newRuntimeEngine(job, sandbox.State{}), Config{StagingRoot: t.TempDir(), OwnerID: "foreign-pin-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = janitor.RunOnce(context.Background()); err == nil || len(storage.releasedPins) != 0 {
+		t.Fatalf("foreign durable scope accepted: error=%v calls=%v", err, storage.releasedPins)
+	}
+}
+
+func TestJanitorLeavesNonNotFoundPinReleasePending(t *testing.T) {
+	s, pool := privateStore(t)
+	job := queuedRuntimeJob(t, s)
+	request, _ := json.Marshal(struct {
+		Scope        storagev1.Scope `json:"scope"`
+		PinID        string          `json:"pinId"`
+		ObjectID     string          `json:"objectId"`
+		HolderID     string          `json:"holderId"`
+		HolderDomain string          `json:"holderDomain"`
+	}{job.Scope, "pin-temporary-error", "snapshot", "leafrun-generation", "service"})
+	if _, err := pool.Exec(context.Background(), `INSERT INTO generation_cleanup_intents(job_id,kind,idempotency_key,request,state,not_before) VALUES($1,'pin.release','release/pin-temporary-error',$2,'pending',clock_timestamp())`, job.JobID, request); err != nil {
+		t.Fatal(err)
+	}
+	storage := newRuntimeStorage(job)
+	storage.releaseErrors = []error{&storagev1.HTTPError{Status: 503, Code: "owner_unavailable", Message: "temporary outage"}}
+	janitor, err := NewJanitor(s, storage, newRuntimeEngine(job, sandbox.State{}), Config{StagingRoot: t.TempDir(), OwnerID: "temporary-pin-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = janitor.RunOnce(context.Background()); err == nil {
+		t.Fatal("non-404 release error was treated as complete")
+	}
+	var state string
+	if err = pool.QueryRow(context.Background(), `SELECT state FROM generation_cleanup_intents WHERE job_id=$1 AND idempotency_key='release/pin-temporary-error'`, job.JobID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state == "complete" || len(storage.releasedPins) != 1 {
+		t.Fatalf("non-404 release error was acknowledged: state=%s released=%v", state, storage.releasedPins)
+	}
+}
+
+func TestJanitorDoesNotAcknowledgeHiddenPinAuthorizationFailure(t *testing.T) {
+	s, pool := privateStore(t)
+	job := queuedRuntimeJob(t, s)
+	request, _ := json.Marshal(map[string]any{"scope": job.Scope, "pinId": "pin-hidden", "objectId": "snapshot", "holderId": "leafrun-generation", "holderDomain": "service"})
+	if _, err := pool.Exec(context.Background(), `INSERT INTO generation_cleanup_intents(job_id,kind,idempotency_key,request,state,not_before) VALUES($1,'pin.release','release/pin-hidden',$2,'pending',clock_timestamp())`, job.JobID, request); err != nil {
+		t.Fatal(err)
+	}
+	storage := newRuntimeStorage(job)
+	storage.releaseErrors = []error{&storagev1.HTTPError{Status: 404, Code: "not_found", Message: "hidden denial"}}
+	janitor, err := NewJanitor(s, storage, newRuntimeEngine(job, sandbox.State{}), Config{StagingRoot: t.TempDir(), OwnerID: "hidden-pin-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = janitor.RunOnce(context.Background()); err == nil {
+		t.Fatal("hidden authorization denial was acknowledged as absence")
+	}
+	var state string
+	if err = pool.QueryRow(context.Background(), `SELECT state FROM generation_cleanup_intents WHERE job_id=$1 AND idempotency_key='release/pin-hidden'`, job.JobID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state == "complete" {
+		t.Fatal("ambiguous 404 destroyed durable cleanup visibility")
+	}
+}
+
+func TestJanitorRejectsMismatchedPinReleaseReceipt(t *testing.T) {
+	s, pool := privateStore(t)
+	job := queuedRuntimeJob(t, s)
+	request, _ := json.Marshal(map[string]any{"scope": job.Scope, "pinId": "pin-mismatch", "objectId": "snapshot", "holderId": "leafrun-generation", "holderDomain": "service"})
+	if _, err := pool.Exec(context.Background(), `INSERT INTO generation_cleanup_intents(job_id,kind,idempotency_key,request,state,not_before) VALUES($1,'pin.release','release/pin-mismatch',$2,'pending',clock_timestamp())`, job.JobID, request); err != nil {
+		t.Fatal(err)
+	}
+	storage := newRuntimeStorage(job)
+	storage.releaseTamper = true
+	janitor, err := NewJanitor(s, storage, newRuntimeEngine(job, sandbox.State{}), Config{StagingRoot: t.TempDir(), OwnerID: "mismatched-pin-cleanup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = janitor.RunOnce(context.Background()); err == nil {
+		t.Fatal("mismatched pin receipt was accepted")
+	}
+	var state string
+	if err = pool.QueryRow(context.Background(), `SELECT state FROM generation_cleanup_intents WHERE job_id=$1 AND idempotency_key='release/pin-mismatch'`, job.JobID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state == "complete" {
+		t.Fatal("mismatched receipt completed cleanup")
+	}
+}
 
 func TestJanitorReopensConfirmedOutputAfterStopCommitGap(t *testing.T) {
 	s, pool := privateStore(t)

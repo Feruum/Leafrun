@@ -24,7 +24,6 @@ const (
 )
 
 var errEntrypointMissing = errors.New("entrypoint is not present in the source snapshot")
-var errSnapshotPinExpired = errors.New("Storage returned an expired snapshot pin")
 
 func validateSourceSnapshot(snapshot storagev1.Snapshot, request generationv1.CreateJobRequest) error {
 	if snapshot.SnapshotID != request.SnapshotID || snapshot.Scope != request.Scope || storagev1.ValidateManifest(snapshot.Manifest) != nil {
@@ -50,9 +49,6 @@ func New(state AdmissionStore, owner OwnerStore, config Config) (*Server, error)
 	}
 	if err := config.validate(); err != nil {
 		return nil, err
-	}
-	if config.Now == nil {
-		config.Now = time.Now
 	}
 	return &Server{store: state, owner: owner, cfg: config}, nil
 }
@@ -250,46 +246,40 @@ func (s *Server) ensureSnapshotPin(ctx context.Context, job generationv1.Job, sn
 				return fmt.Errorf("acquire source pin: %w", err)
 			}
 		}
-		if err = validatePin(request, pin, s.cfg.Now()); errors.Is(err, errSnapshotPinExpired) {
-			if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
-				return fmt.Errorf("record expired snapshot pin: %w", e)
-			}
-			continue
-		} else if err != nil {
+		if err = validatePin(request, pin); err != nil {
 			return err
 		}
 		if err = s.store.RecordPinAcquireResponse(ctx, job.JobID, acquire.Key, pin); err != nil {
 			return fmt.Errorf("persist snapshot pin receipt: %w", err)
 		}
-		if pin.State == "pending" {
-			activated, activateErr := s.cfg.Pins.ActivatePin(ctx, pin.PinID)
-			if activateErr != nil {
-				if isExpiredPinError(activateErr) {
-					if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
-						return fmt.Errorf("record expired snapshot pin: %w", e)
-					}
-					continue
+		// Storage checks expiry as well as state when activation is repeated for
+		// an already-active pin, so its response remains authoritative here.
+		activated, activateErr := s.cfg.Pins.ActivatePin(ctx, pin.PinID)
+		if activateErr != nil {
+			if isExpiredPinError(activateErr) {
+				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
+					return fmt.Errorf("record expired snapshot pin: %w", e)
 				}
-				// A lost successful response is recovered by reading the same pin.
-				activated, err = s.cfg.Pins.GetPin(ctx, pin.PinID)
-				if isExpiredPinError(err) {
-					if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
-						return fmt.Errorf("record expired source pin: %w", e)
-					}
-					continue
-				}
-				if err != nil {
-					return fmt.Errorf("recover source pin activation: %w", err)
-				}
+				continue
 			}
-			pin = activated
+			var rejection *HTTPStatusError
+			if errors.As(activateErr, &rejection) {
+				return fmt.Errorf("Storage rejected snapshot pin activation: %w", activateErr)
+			}
+			// Only an ambiguous transport failure can hide a successful response.
+			activated, err = s.cfg.Pins.GetPin(ctx, pin.PinID)
+			if isExpiredPinError(err) {
+				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
+					return fmt.Errorf("record expired source pin: %w", e)
+				}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("recover source pin activation: %w", err)
+			}
 		}
-		if err = validatePin(request, pin, s.cfg.Now()); errors.Is(err, errSnapshotPinExpired) {
-			if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
-				return fmt.Errorf("record expired snapshot pin: %w", e)
-			}
-			continue
-		} else if err != nil || pin.State != "active" {
+		pin = activated
+		if err = validatePin(request, pin); err != nil || pin.State != "active" {
 			return errors.New("Storage did not confirm an active snapshot pin")
 		}
 		if err = s.store.RecordPinAcquireResponse(ctx, job.JobID, acquire.Key, pin); err != nil {
@@ -355,12 +345,9 @@ func decodePinRequest(data []byte) (storagev1.AcquirePinRequest, error) {
 	return request, err
 }
 
-func validatePin(request storagev1.AcquirePinRequest, pin storagev1.Pin, now time.Time) error {
+func validatePin(request storagev1.AcquirePinRequest, pin storagev1.Pin) error {
 	if pin.PinID == "" || pin.Scope != request.Scope || pin.ObjectID != request.ObjectID || pin.HolderID != request.HolderID || pin.HolderDomain != request.HolderDomain || pin.RetentionPolicy != request.RetentionPolicy || pin.ExpiresAt.IsZero() || (pin.State != "pending" && pin.State != "active" && pin.State != "released") {
 		return errors.New("Storage returned a source pin with mismatched bindings")
-	}
-	if !pin.ExpiresAt.After(now) {
-		return errSnapshotPinExpired
 	}
 	if pin.State == "released" {
 		return errors.New("Storage returned a released snapshot pin")

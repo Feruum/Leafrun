@@ -83,22 +83,40 @@ type storageFixture struct {
 	uploads                 map[string]storagev1.Upload
 	creates                 map[string]string
 	artifacts               map[string]storagev1.Artifact
+	resources               map[string]storagev1.Resource
+	createRequests          []storagev1.CreateUploadRequest
 	requests                []storagev1.FinalizeArtifactRequest
+	finalizeUploadIDs       []string
+	commitErrors            []error
+	finalizeErrors          []error
+	releaseErrors           []error
+	releasedPins            []string
+	releaseStates           []storagev1.PinReleaseState
+	releaseTamper           bool
+	onExpiredRenew          func()
+	expireFirstCreate       bool
+	expireAfterPutAt        int
 	failFinalize            bool
+	failCommit              bool
 	failReadAfterPut        bool
 	tamperSnapshotRefs      bool
 	finalizeCalls, putCalls int
+	commitCalls             int
 }
 
 func newStorageFixture() *storageFixture {
-	return &storageFixture{uploads: map[string]storagev1.Upload{}, creates: map[string]string{}, artifacts: map[string]storagev1.Artifact{}}
+	return &storageFixture{uploads: map[string]storagev1.Upload{}, creates: map[string]string{}, artifacts: map[string]storagev1.Artifact{}, resources: map[string]storagev1.Resource{}}
 }
 func (f *storageFixture) CreateUpload(_ context.Context, in storagev1.CreateUploadRequest) (storagev1.Upload, error) {
+	f.createRequests = append(f.createRequests, in)
 	if id := f.creates[in.IdempotencyKey]; id != "" {
 		return f.uploads[id], nil
 	}
 	id := fmt.Sprintf("upload-%d", len(f.uploads)+1)
-	u := storagev1.Upload{UploadID: id, Scope: in.Scope, Class: in.Class, State: "pending", SizeBytes: in.SizeBytes, SHA256: in.SHA256, WriterToken: "writer-" + id, LeaseUntil: time.Now().Add(time.Hour), CreatedAt: time.Now().UTC()}
+	u := storagev1.Upload{UploadID: id, Scope: in.Scope, Class: in.Class, State: "created", SizeBytes: in.SizeBytes, SHA256: in.SHA256, WriterToken: "writer-" + id, LeaseUntil: time.Now().Add(time.Hour), CreatedAt: time.Now().UTC()}
+	if f.expireFirstCreate && len(f.uploads) == 0 {
+		u.LeaseUntil = time.Now().Add(-time.Second)
+	}
 	f.creates[in.IdempotencyKey] = id
 	f.uploads[id] = u
 	return u, nil
@@ -144,6 +162,12 @@ func (f *storageFixture) RenewUpload(_ context.Context, id string, in storagev1.
 	if in.WriterToken != u.WriterToken {
 		return u, errors.New("wrong writer")
 	}
+	if !time.Now().Before(u.LeaseUntil) {
+		if f.onExpiredRenew != nil {
+			f.onExpiredRenew()
+		}
+		return u, writerExpiredError()
+	}
 	u.LeaseUntil = time.Now().Add(time.Hour)
 	f.uploads[id] = u
 	return u, nil
@@ -157,16 +181,26 @@ func (f *storageFixture) PutUpload(_ context.Context, id, writer string, r io.Re
 		return u, errors.New("invalid upload")
 	}
 	u.State = "uploaded"
+	if f.expireAfterPutAt == f.putCalls {
+		u.LeaseUntil = time.Now().Add(-time.Second)
+	}
 	f.uploads[id] = u
 	return u, nil
 }
 func (f *storageFixture) FinalizeArtifact(_ context.Context, id string, in storagev1.FinalizeArtifactRequest) (storagev1.Artifact, error) {
 	f.finalizeCalls++
 	f.requests = append(f.requests, in)
+	f.finalizeUploadIDs = append(f.finalizeUploadIDs, id)
 	if a, ok := f.artifacts[id]; ok {
 		return a, nil
 	}
 	u := f.uploads[id]
+	if f.finalizeCalls <= len(f.finalizeErrors) && f.finalizeErrors[f.finalizeCalls-1] != nil {
+		return storagev1.Artifact{}, f.finalizeErrors[f.finalizeCalls-1]
+	}
+	if !time.Now().Before(u.LeaseUntil) {
+		return storagev1.Artifact{}, writerExpiredError()
+	}
 	now := time.Now().UTC()
 	a := storagev1.Artifact{ArtifactID: "artifact-" + id, Scope: u.Scope, OriginJobID: in.OriginJobID, SnapshotID: in.SnapshotID, Hash: u.SHA256, SizeBytes: u.SizeBytes, Metadata: in.Metadata, CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour)}
 	f.artifacts[id] = a
@@ -186,14 +220,30 @@ func (*storageFixture) ResourceContent(context.Context, string) (*http.Response,
 	return nil, errors.New("unexpected resource read")
 }
 func (f *storageFixture) CommitResource(_ context.Context, id string, in storagev1.CommitResourceRequest) (storagev1.Resource, error) {
+	f.commitCalls++
+	if r, ok := f.resources[id]; ok {
+		return r, nil
+	}
+	if f.commitCalls <= len(f.commitErrors) && f.commitErrors[f.commitCalls-1] != nil {
+		return storagev1.Resource{}, f.commitErrors[f.commitCalls-1]
+	}
 	u := f.uploads[id]
 	if u.WriterToken != in.WriterToken {
 		return storagev1.Resource{}, errors.New("wrong resource writer")
 	}
+	if !time.Now().Before(u.LeaseUntil) {
+		return storagev1.Resource{}, writerExpiredError()
+	}
 	u.State = "committed"
 	u.ResourceID = "resource-" + id
 	f.uploads[id] = u
-	return storagev1.Resource{ResourceID: u.ResourceID, Scope: u.Scope, Class: u.Class, SizeBytes: u.SizeBytes, SHA256: u.SHA256, CreatedAt: u.CreatedAt}, nil
+	r := storagev1.Resource{ResourceID: u.ResourceID, Scope: u.Scope, Class: u.Class, SizeBytes: u.SizeBytes, SHA256: u.SHA256, CreatedAt: u.CreatedAt}
+	f.resources[id] = r
+	if f.failCommit {
+		f.failCommit = false
+		return storagev1.Resource{}, errors.New("lost resource commit acknowledgement")
+	}
+	return r, nil
 }
 func (f *storageFixture) CreateSnapshot(_ context.Context, in storagev1.CreateSnapshotRequest) (storagev1.Snapshot, error) {
 	if f.tamperSnapshotRefs {
@@ -241,7 +291,34 @@ func TestPublicationWriterCredentialsAreScrubbedWithSensitiveHistory(t *testing.
 		t.Fatalf("writer credentials retained after sensitive TTL: %d records", credentials)
 	}
 }
-func (*storageFixture) ReleasePin(context.Context, string) error { return nil }
+func (f *storageFixture) ReleasePin(_ context.Context, id string) error {
+	f.releasedPins = append(f.releasedPins, id)
+	index := len(f.releasedPins) - 1
+	if index < len(f.releaseErrors) {
+		return f.releaseErrors[index]
+	}
+	return nil
+}
+
+func (f *storageFixture) ReleasePinBound(ctx context.Context, id string, binding storagev1.PinReleaseRequest) (storagev1.PinReleaseReceipt, error) {
+	if err := f.ReleasePin(ctx, id); err != nil {
+		return storagev1.PinReleaseReceipt{}, err
+	}
+	state := storagev1.PinReleaseReleased
+	index := len(f.releasedPins) - 1
+	if index < len(f.releaseStates) {
+		state = f.releaseStates[index]
+	}
+	receipt := storagev1.PinReleaseReceipt{PinID: id, Binding: binding, State: state}
+	if f.releaseTamper {
+		receipt.Binding.ObjectID = "different-object"
+	}
+	return receipt, nil
+}
+
+func writerExpiredError() error {
+	return &storagev1.HTTPError{Status: http.StatusConflict, Code: "writer_expired", Message: "upload writer lease expired"}
+}
 
 func preparedOutput(t *testing.T, s *store.Store, root string, withParameters ...bool) (generationv1.Job, store.Attempt) {
 	t.Helper()
@@ -272,11 +349,12 @@ func preparedOutput(t *testing.T, s *store.Store, root string, withParameters ..
 	if err = s.MarkPinActiveAndRecordWorkflowStart(ctx, job.JobID, acquire.IdempotencyKey, "render/"+job.JobID, pin, []byte(fmt.Sprintf(`{"jobId":%q}`, job.JobID))); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, "stage-test")
+	stageToken := "0123456789abcdef0123456789abcdef"
+	path := filepath.Join(root, stageToken)
 	if err = os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	a, err := s.ClaimExecution(ctx, store.ClaimAttemptInput{JobID: job.JobID, CreateContainerIntentKey: "create", StagingToken: "stage-test", PrivateStagingPath: path})
+	a, err := s.ClaimExecution(ctx, store.ClaimAttemptInput{JobID: job.JobID, CreateContainerIntentKey: "create", StagingToken: stageToken, PrivateStagingPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,6 +494,295 @@ func TestPublicationRecoversLostFinalizeWithoutRerenderOrReupload(t *testing.T) 
 	}
 	if event.Producer != "leafrun-generation" || string(event.Data) != fmt.Sprintf(`{"jobId":%q}`, job.JobID) {
 		t.Fatalf("completion event incompatible with consumer: %+v %s", event, event.Data)
+	}
+}
+
+func TestPublicationRotatesExpiredPDFUploadBeforePutWithoutRerender(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	storage.expireFirstCreate = true
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	assertOneRenderAttempt(t, pool, job.JobID)
+	if len(storage.createRequests) != 2 || storage.createRequests[0].IdempotencyKey == storage.createRequests[1].IdempotencyKey || storage.putCalls != 1 || storage.finalizeCalls != 1 || storage.finalizeUploadIDs[0] != "upload-2" {
+		t.Fatalf("expired pre-PUT writer was not replaced with a fresh upload: creates=%+v puts=%d finalizes=%d uploadIDs=%v", storage.createRequests, storage.putCalls, storage.finalizeCalls, storage.finalizeUploadIDs)
+	}
+}
+
+func TestPublicationCannotRotateAfterPublisherLeaseTakeover(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	storage.expireFirstCreate = true
+	storage.onExpiredRenew = func() {
+		storage.onExpiredRenew = nil
+		if _, err := pool.Exec(context.Background(), `UPDATE generation_jobs SET publication_lease_until=clock_timestamp()-interval '1 second' WHERE job_id=$1`, job.JobID); err != nil {
+			t.Fatalf("expire old publisher lease: %v", err)
+		}
+		if _, err := s.BeginPublication(context.Background(), job.JobID, "replacement-publisher"); err != nil {
+			t.Fatalf("take over publication lease: %v", err)
+		}
+	}
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); !errors.Is(err, store.ErrLeaseLost) {
+		t.Fatalf("stale publisher should fail before rotating upload: %v", err)
+	}
+	if len(storage.createRequests) != 1 || len(storage.uploads) != 1 || storage.putCalls != 0 {
+		t.Fatalf("stale publisher created or wrote a replacement upload: creates=%d uploads=%d puts=%d", len(storage.createRequests), len(storage.uploads), storage.putCalls)
+	}
+}
+
+func TestPublicationRotatesExpiredUploadedPDFBeforeFinalizeWithoutRerender(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	storage.expireAfterPutAt = 1
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	assertOneRenderAttempt(t, pool, job.JobID)
+	if len(storage.createRequests) != 2 || storage.createRequests[0].IdempotencyKey == storage.createRequests[1].IdempotencyKey || storage.putCalls != 2 || storage.finalizeCalls != 2 || storage.finalizeUploadIDs[0] == storage.finalizeUploadIDs[1] {
+		t.Fatalf("expired uploaded writer was not safely replaced: creates=%+v puts=%d finalizes=%d uploadIDs=%v", storage.createRequests, storage.putCalls, storage.finalizeCalls, storage.finalizeUploadIDs)
+	}
+}
+
+func TestPublicationRotatesPersistedFinalizeOnlyAfterExactWriterExpiredRejection(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	storage.finalizeErrors = []error{errors.New("lost finalize response"), writerExpiredError()}
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err == nil {
+		t.Fatal("uncertain finalize response must remain unresolved")
+	}
+	if len(storage.createRequests) != 1 || storage.putCalls != 1 {
+		t.Fatalf("transport uncertainty caused an unsafe rotation: creates=%d puts=%d", len(storage.createRequests), storage.putCalls)
+	}
+	for id, upload := range storage.uploads {
+		upload.LeaseUntil = time.Now().Add(-time.Second)
+		storage.uploads[id] = upload
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	assertOneRenderAttempt(t, pool, job.JobID)
+	if len(storage.createRequests) != 2 || storage.putCalls != 2 || storage.finalizeCalls != 3 || storage.requests[0] != storage.requests[1] || storage.finalizeUploadIDs[0] != storage.finalizeUploadIDs[1] || storage.finalizeUploadIDs[2] == storage.finalizeUploadIDs[1] || storage.requests[2].IdempotencyKey == storage.requests[1].IdempotencyKey {
+		t.Fatalf("expired finalize intent was not replayed then rotated: creates=%d puts=%d finalizes=%d requests=%+v uploadIDs=%v", len(storage.createRequests), storage.putCalls, storage.finalizeCalls, storage.requests, storage.finalizeUploadIDs)
+	}
+}
+
+func TestPublicationDoesNotRotateAfterCommittedFinalizeLostACKAndExpiredLease(t *testing.T) {
+	s, _ := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	storage.failFinalize = true
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err == nil {
+		t.Fatal("lost response must remain unresolved")
+	}
+	for id, upload := range storage.uploads {
+		upload.LeaseUntil = time.Now().Add(-time.Second)
+		storage.uploads[id] = upload
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if len(storage.createRequests) != 1 || len(storage.uploads) != 1 || storage.putCalls != 1 || storage.finalizeCalls != 2 || storage.requests[0] != storage.requests[1] {
+		t.Fatalf("committed finalize was rotated after lost ACK: creates=%d uploads=%d puts=%d finalizes=%d", len(storage.createRequests), len(storage.uploads), storage.putCalls, storage.finalizeCalls)
+	}
+}
+
+func TestPublicationDoesNotRotateOnOtherConflict(t *testing.T) {
+	s, _ := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	storage.finalizeErrors = []error{&storagev1.HTTPError{Status: http.StatusConflict, Code: "idempotency_conflict", Message: "request changed"}}
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err == nil {
+		t.Fatal("other Storage conflict must be returned")
+	}
+	if len(storage.createRequests) != 1 || len(storage.uploads) != 1 || storage.putCalls != 1 || storage.finalizeCalls != 1 {
+		t.Fatalf("non-expiry conflict caused upload rotation: creates=%d uploads=%d puts=%d finalizes=%d", len(storage.createRequests), len(storage.uploads), storage.putCalls, storage.finalizeCalls)
+	}
+}
+
+func TestPublicationRotatesExpiredDerivedResourceWriterWithoutRerender(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root, true)
+	storage := newStorageFixture()
+	storage.commitErrors = []error{writerExpiredError()}
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	assertOneRenderAttempt(t, pool, job.JobID)
+	done, err := s.GetJob(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != generationv1.Succeeded || done.DerivedSnapshotID == "" || len(storage.createRequests) != 3 || storage.putCalls != 3 || storage.commitCalls != 2 {
+		t.Fatalf("expired derived resource writer was not rotated: job=%+v creates=%d puts=%d commits=%d", done, len(storage.createRequests), storage.putCalls, storage.commitCalls)
+	}
+}
+
+func TestPublicationDoesNotRotateAfterCommittedResourceLostACKAndExpiredLease(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, _ := preparedOutput(t, s, root, true)
+	storage := newStorageFixture()
+	storage.failCommit = true
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err == nil {
+		t.Fatal("lost resource commit acknowledgement must remain unresolved")
+	}
+	for id, upload := range storage.uploads {
+		upload.LeaseUntil = time.Now().Add(-time.Second)
+		storage.uploads[id] = upload
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	assertOneRenderAttempt(t, pool, job.JobID)
+	done, err := s.GetJob(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != generationv1.Succeeded || len(storage.uploads) != 2 || len(storage.createRequests) != 2 || storage.putCalls != 2 || storage.commitCalls != 2 {
+		t.Fatalf("committed resource was rotated after lost ACK: job=%+v uploads=%d creates=%d puts=%d commits=%d", done, len(storage.uploads), len(storage.createRequests), storage.putCalls, storage.commitCalls)
+	}
+}
+
+func TestPublicationRemovesStagingAfterDurableTerminalCleanupIsScheduled(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, attempt := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(attempt.PrivateStagingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal attempt staging was not removed: stat err=%v", err)
+	}
+	var scheduled int
+	if err = pool.QueryRow(context.Background(), `SELECT count(*) FROM generation_cleanup_intents WHERE job_id=$1 AND kind='attempt.files' AND idempotency_key=$2 AND state<>'complete'`, job.JobID, attempt.AttemptID).Scan(&scheduled); err != nil {
+		t.Fatal(err)
+	}
+	if scheduled != 1 {
+		t.Fatalf("stage was removed without durable cleanup intent: intents=%d", scheduled)
+	}
+}
+
+func TestPublicationKeepsStagingWhenDurableCleanupSchedulingFails(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, attempt := preparedOutput(t, s, root)
+	if _, err := pool.Exec(context.Background(), `CREATE FUNCTION block_attempt_file_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.kind='attempt.files' THEN RAISE EXCEPTION 'injected cleanup insert failure'; END IF; RETURN NEW; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `CREATE TRIGGER block_attempt_file_cleanup BEFORE INSERT ON generation_cleanup_intents FOR EACH ROW EXECUTE FUNCTION block_attempt_file_cleanup()`); err != nil {
+		t.Fatal(err)
+	}
+	storage := newStorageFixture()
+	p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Publish(context.Background(), job.JobID); err != nil {
+		t.Fatalf("committed publication should not fail on best-effort cleanup scheduling: %v", err)
+	}
+	done, err := s.GetJob(context.Background(), job.JobID)
+	if err != nil || done.Status != generationv1.Succeeded {
+		t.Fatalf("cleanup failure changed terminal success: job=%+v err=%v", done, err)
+	}
+	if _, err = os.Stat(attempt.PrivateStagingPath); err != nil {
+		t.Fatalf("staging was removed without durable cleanup intent: %v", err)
+	}
+	attempts, err := s.TerminalAttempts(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].AttemptID != attempt.AttemptID {
+		t.Fatalf("janitor fallback cannot recover unscheduled terminal staging: %+v", attempts)
+	}
+}
+
+func assertOneRenderAttempt(t *testing.T, pool *pgxpool.Pool, jobID string) {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM generation_attempts WHERE job_id=$1`, jobID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("publication recovery rerendered: attempts=%d", count)
+	}
+}
+
+func TestPublicationUploadRotationBudgetSurvivesPublisherRestart(t *testing.T) {
+	s, pool := privateStore(t)
+	root := t.TempDir()
+	job, attempt := preparedOutput(t, s, root)
+	storage := newStorageFixture()
+	for range 16 {
+		storage.finalizeErrors = append(storage.finalizeErrors, writerExpiredError())
+	}
+	for range 2 {
+		p, err := NewPublisher(s, storage, pinFixture{}, accessFixture{allow: true}, Config{StagingRoot: root, OwnerID: "publisher"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = p.Publish(context.Background(), job.JobID); err == nil {
+			t.Fatal("repeated writer expiry exceeded its recovery budget")
+		}
+		if len(storage.uploads) != 4 || len(storage.createRequests) != 4 {
+			t.Fatalf("publisher restart reset the upload replacement budget: uploads=%d creates=%d", len(storage.uploads), len(storage.createRequests))
+		}
+	}
+	assertOneRenderAttempt(t, pool, job.JobID)
+	current, err := s.GetJob(context.Background(), job.JobID)
+	if err != nil || current.Status != generationv1.Publishing || current.Artifact != nil || !current.Deadline.Equal(job.Deadline) {
+		t.Fatalf("replacement budget changed the original job/expiry: %+v, %v", current, err)
+	}
+	if _, err = os.Stat(attempt.PrivateStagingPath); err != nil {
+		t.Fatalf("unpublished output was discarded after bounded recovery: %v", err)
 	}
 }
 

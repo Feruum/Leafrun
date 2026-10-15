@@ -34,6 +34,23 @@ type finalizeIntent struct {
 	Scope    storagev1.Scope                   `json:"scope"`
 }
 
+const (
+	intentUploadRotate = "upload.rotate"
+	maxUploadRotations = 3
+)
+
+type uploadKeys struct {
+	Create   string `json:"create"`
+	Put      string `json:"put"`
+	Commit   string `json:"commit"`
+	Finalize string `json:"finalize"`
+}
+
+type uploadRotation struct {
+	PreviousUploadID string     `json:"previousUploadId"`
+	Keys             uploadKeys `json:"keys"`
+}
+
 // effect replays identical bytes across publication epochs. Each new owner
 // saves its own fenced intent before using any earlier receipt or making IO.
 func effect[Request, Response any](ctx context.Context, p *Publisher, a store.Attempt, l store.PublicationLease, kind, key string, request Request, call func(Request) (Response, error)) (Response, error) {
@@ -165,8 +182,13 @@ func (p *Publisher) Publish(ctx context.Context, jobID string) error {
 		diagnostics = []byte("[]")
 	}
 	err = p.state.TerminalSuccess(publishCtx, store.SuccessInput{JobID: jobID, Publisher: lease.Owner, PublicationEpoch: lease.Epoch, CandidateID: candidate.CandidateID, Artifact: candidate.Artifact, Diagnostics: diagnostics, RawDiagnostics: record.Terminal.RawDiagnostics})
-	if err == nil {
-		_ = p.state.ScheduleAttemptCleanup(publishCtx, a.AttemptID)
+	if err == nil && a.StopConfirmed && privateToken.MatchString(a.StagingToken) && filepath.Clean(a.PrivateStagingPath) == filepath.Join(filepath.Clean(p.cfg.StagingRoot), a.StagingToken) {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), controllerCallTimeout)
+		scheduleErr := p.state.ScheduleAttemptCleanup(cleanupCtx, a.AttemptID)
+		cancelCleanup()
+		if scheduleErr == nil {
+			_ = removePrivateAttemptDir(p.cfg.StagingRoot, a.StagingToken, a.PrivateStagingPath)
+		}
 	}
 	return err
 }
@@ -220,16 +242,18 @@ func (p *Publisher) finalize(ctx context.Context, job generationv1.Job, a store.
 	if findErr != nil && !errors.Is(findErr, store.ErrNotFound) {
 		return candidate, findErr
 	}
-	var final finalizeIntent
+	keys := initialPDFUploadKeys(a)
+	var baseFinal finalizeIntent
+	var baseUpload storagev1.Upload
 	var staged *sandbox.Output
 	if findErr == nil {
-		if err := jsonvalue.Unmarshal(previous.Request, &final, 16<<20); err != nil {
+		if err := jsonvalue.Unmarshal(previous.Request, &baseFinal, 16<<20); err != nil {
 			return candidate, err
 		}
+		baseUpload = storagev1.Upload{UploadID: baseFinal.UploadID, Scope: baseFinal.Scope, Class: storagev1.ClassResult, SizeBytes: baseFinal.Size, SHA256: baseFinal.SHA256, WriterToken: baseFinal.Request.WriterToken}
 	} else {
 		var err error
-		var stagingErr error
-		staged, stagingErr = p.reopen(ctx, job, a, in, r)
+		staged, _ = p.reopen(ctx, job, a, in, r)
 		snapshotID := job.SourceSnapshotID
 		if len(in.Request.Parameters) > 0 {
 			snapshotID, err = p.saveDerived(ctx, job, a, l, staged, r)
@@ -237,38 +261,72 @@ func (p *Publisher) finalize(ctx context.Context, job generationv1.Job, a store.
 				return candidate, err
 			}
 		}
-		create := storagev1.CreateUploadRequest{Scope: job.Scope, Class: storagev1.ClassResult, SizeBytes: r.Terminal.PDF.Size, SHA256: r.Terminal.PDF.SHA256, IdempotencyKey: stableKey(a, "pdf-upload")}
-		upload, err := effect(ctx, p, a, l, store.IntentUploadCreate, create.IdempotencyKey, create, func(q storagev1.CreateUploadRequest) (storagev1.Upload, error) { return p.storage.CreateUpload(ctx, q) })
+		create := storagev1.CreateUploadRequest{Scope: job.Scope, Class: storagev1.ClassResult, SizeBytes: r.Terminal.PDF.Size, SHA256: r.Terminal.PDF.SHA256, IdempotencyKey: keys.Create}
+		baseUpload, err = effect(ctx, p, a, l, store.IntentUploadCreate, keys.Create, create, func(q storagev1.CreateUploadRequest) (storagev1.Upload, error) { return p.storage.CreateUpload(ctx, q) })
 		if err != nil {
 			return candidate, err
 		}
-		if err = p.put(ctx, job, a, l, upload, "pdf", func() (io.ReadCloser, error) {
-			if staged == nil {
-				return nil, stagingErr
-			}
-			return staged.OpenPDF()
-		}); err != nil {
+		if err = validateUpload(baseUpload, job.Scope, storagev1.ClassResult, r.Terminal.PDF.Size, r.Terminal.PDF.SHA256); err != nil {
 			return candidate, err
 		}
-		final = finalizeIntent{UploadID: upload.UploadID, Scope: job.Scope, SHA256: r.Terminal.PDF.SHA256, Size: r.Terminal.PDF.Size, Request: storagev1.FinalizeArtifactRequest{WriterToken: upload.WriterToken, OriginJobID: job.JobID, SnapshotID: snapshotID, Metadata: storagev1.ArtifactMetadata{Filename: "document.pdf", MediaType: "application/pdf", TargetID: job.TargetID, AttemptID: a.AttemptID, InputFingerprint: job.InputFingerprint}, IdempotencyKey: finalKey}}
+		baseFinal = finalizeIntent{UploadID: baseUpload.UploadID, Scope: job.Scope, SHA256: r.Terminal.PDF.SHA256, Size: r.Terminal.PDF.Size, Request: storagev1.FinalizeArtifactRequest{WriterToken: baseUpload.WriterToken, OriginJobID: job.JobID, SnapshotID: snapshotID, Metadata: storagev1.ArtifactMetadata{Filename: "document.pdf", MediaType: "application/pdf", TargetID: job.TargetID, AttemptID: a.AttemptID, InputFingerprint: job.InputFingerprint}, IdempotencyKey: keys.Finalize}}
 	}
-	// GetUpload is the recovery surface before publication. GetArtifact requires
-	// committed success and cannot be used to close the finalize/commit gap.
-	current, err := p.storage.GetUpload(ctx, final.UploadID)
+	openPDF := func() (io.ReadCloser, error) {
+		if staged == nil {
+			var err error
+			staged, err = p.reopen(ctx, job, a, in, r)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return staged.OpenPDF()
+	}
+	current, currentKeys, rotations, err := p.putWithRotations(ctx, job, a, l, baseUpload, keys, 0, "pdf", openPDF)
 	if err != nil {
 		return candidate, err
 	}
-	if current.Scope != job.Scope || current.Class != storagev1.ClassResult || current.SizeBytes != final.Size || current.SHA256 != final.SHA256 || final.Scope != job.Scope || final.Request.OriginJobID != job.JobID || final.Request.Metadata.AttemptID != a.AttemptID || final.Request.Metadata.TargetID != job.TargetID || final.Request.Metadata.InputFingerprint != job.InputFingerprint || final.SHA256 != r.Terminal.PDF.SHA256 || final.Size != r.Terminal.PDF.Size {
-		return candidate, errors.New("finalize intent/upload bindings differ")
-	}
-	if current.State != "committed" && current.State != "uploaded" {
-		return candidate, errors.New("finalize upload is not ready")
-	}
-	artifact, err := effect(ctx, p, a, l, store.IntentArtifactFinalize, finalKey, final, func(q finalizeIntent) (storagev1.Artifact, error) {
-		return p.storage.FinalizeArtifact(ctx, q.UploadID, q.Request)
-	})
-	if err != nil {
-		return candidate, err
+	var final finalizeIntent
+	var artifact storagev1.Artifact
+	for {
+		final = baseFinal
+		final.UploadID = current.UploadID
+		final.Request.WriterToken = current.WriterToken
+		final.Request.IdempotencyKey = currentKeys.Finalize
+		// GetUpload is the recovery surface before publication. GetArtifact
+		// requires committed success and cannot close the finalize/commit gap.
+		latest, getErr := p.storage.GetUpload(ctx, current.UploadID)
+		if getErr != nil {
+			return candidate, getErr
+		}
+		if getErr = validateUpload(latest, job.Scope, storagev1.ClassResult, final.Size, final.SHA256); getErr != nil || final.Scope != job.Scope || final.Request.OriginJobID != job.JobID || final.Request.Metadata.AttemptID != a.AttemptID || final.Request.Metadata.TargetID != job.TargetID || final.Request.Metadata.InputFingerprint != job.InputFingerprint || final.SHA256 != r.Terminal.PDF.SHA256 || final.Size != r.Terminal.PDF.Size {
+			return candidate, errors.New("finalize intent/upload bindings differ")
+		}
+		if latest.State != "committed" && latest.State != "uploaded" {
+			return candidate, errors.New("finalize upload is not ready")
+		}
+		artifact, err = effect(ctx, p, a, l, store.IntentArtifactFinalize, currentKeys.Finalize, final, func(q finalizeIntent) (storagev1.Artifact, error) {
+			return p.storage.FinalizeArtifact(ctx, q.UploadID, q.Request)
+		})
+		if err == nil {
+			current = latest
+			break
+		}
+		if !writerExpired(err) || rotations >= maxUploadRotations {
+			return candidate, err
+		}
+		current, err = p.latestRotatableUpload(ctx, job.Scope, storagev1.ClassResult, final.Size, final.SHA256, latest)
+		if err != nil {
+			return candidate, err
+		}
+		current, currentKeys, err = p.rotateUpload(ctx, job, a, l, "pdf", current)
+		if err != nil {
+			return candidate, err
+		}
+		rotations++
+		current, currentKeys, rotations, err = p.putWithRotations(ctx, job, a, l, current, currentKeys, rotations, "pdf", openPDF)
+		if err != nil {
+			return candidate, err
+		}
 	}
 	if artifact.Hash != final.SHA256 || artifact.SizeBytes != final.Size || artifact.Scope != job.Scope || artifact.Metadata != final.Request.Metadata || artifact.SnapshotID != final.Request.SnapshotID || artifact.OriginJobID != job.JobID || artifact.ExpiresAt.Sub(artifact.CreatedAt) != 24*time.Hour {
 		return candidate, errors.New("Storage finalize receipt differs from expected result")
@@ -285,11 +343,11 @@ type putIntent struct {
 	Upload storagev1.Upload `json:"upload"`
 }
 
-func (p *Publisher) put(ctx context.Context, job generationv1.Job, a store.Attempt, l store.PublicationLease, upload storagev1.Upload, label string, open func() (io.ReadCloser, error)) error {
+func (p *Publisher) put(ctx context.Context, job generationv1.Job, a store.Attempt, l store.PublicationLease, upload storagev1.Upload, putKey, label string, open func() (io.ReadCloser, error)) error {
 	if upload.Scope != job.Scope || upload.UploadID == "" || upload.WriterToken == "" {
 		return errors.New("invalid upload receipt")
 	}
-	_, err := effect(ctx, p, a, l, store.IntentUploadPut, stableKey(a, "put/"+label), putIntent{upload}, func(q putIntent) (storagev1.Upload, error) {
+	_, err := effect(ctx, p, a, l, store.IntentUploadPut, putKey, putIntent{upload}, func(q putIntent) (storagev1.Upload, error) {
 		current, err := p.storage.GetUpload(ctx, q.Upload.UploadID)
 		if err != nil {
 			return current, err
@@ -311,6 +369,172 @@ func (p *Publisher) put(ctx context.Context, job generationv1.Job, a store.Attem
 		return p.storage.PutUpload(ctx, current.UploadID, q.Upload.WriterToken, file)
 	})
 	return err
+}
+
+func initialPDFUploadKeys(a store.Attempt) uploadKeys {
+	return uploadKeys{Create: stableKey(a, "pdf-upload"), Put: stableKey(a, "put/pdf"), Finalize: stableKey(a, "finalize")}
+}
+
+func initialResourceUploadKeys(a store.Attempt, label string) uploadKeys {
+	return uploadKeys{Create: stableKey(a, "resource/"+label), Put: stableKey(a, "put/"+label), Commit: stableKey(a, "commit/"+label)}
+}
+
+func validateUpload(u storagev1.Upload, scope storagev1.Scope, class storagev1.ObjectClass, size int64, hash string) error {
+	if u.UploadID == "" || u.WriterToken == "" || u.Scope != scope || u.Class != class || u.SizeBytes != size || u.SHA256 != hash {
+		return errors.New("upload receipt bindings differ")
+	}
+	return nil
+}
+
+func writerExpired(err error) bool {
+	var api *storagev1.HTTPError
+	return errors.As(err, &api) && api.Status == 409 && api.Code == "writer_expired"
+}
+
+func uploadRotationKey(a store.Attempt, label, uploadID string) string {
+	return stableKey(a, "upload-rotation/"+label+"/"+uploadID)
+}
+
+func nextUploadRotation(a store.Attempt, label string, current storagev1.Upload) uploadRotation {
+	seed := "upload-generation/" + label + "/" + current.UploadID
+	return uploadRotation{
+		PreviousUploadID: current.UploadID,
+		Keys: uploadKeys{
+			Create:   stableKey(a, seed+"/create"),
+			Put:      stableKey(a, seed+"/put"),
+			Commit:   stableKey(a, seed+"/commit"),
+			Finalize: stableKey(a, seed+"/finalize"),
+		},
+	}
+}
+
+func (p *Publisher) latestRotatableUpload(ctx context.Context, scope storagev1.Scope, class storagev1.ObjectClass, size int64, hash string, receipt storagev1.Upload) (storagev1.Upload, error) {
+	if err := validateUpload(receipt, scope, class, size, hash); err != nil {
+		return storagev1.Upload{}, err
+	}
+	current, err := p.storage.GetUpload(ctx, receipt.UploadID)
+	if err != nil {
+		return storagev1.Upload{}, err
+	}
+	if err = validateUpload(current, scope, class, size, hash); err != nil {
+		return storagev1.Upload{}, err
+	}
+	if current.State != "created" && current.State != "writing" && current.State != "uploaded" || current.ArtifactID != "" || current.ResourceID != "" {
+		return storagev1.Upload{}, errors.New("Storage upload is not safely rotatable")
+	}
+	return current, nil
+}
+
+func (p *Publisher) rotateUpload(ctx context.Context, job generationv1.Job, a store.Attempt, l store.PublicationLease, label string, current storagev1.Upload) (storagev1.Upload, uploadKeys, error) {
+	var empty uploadKeys
+	if current.State != "created" && current.State != "writing" && current.State != "uploaded" || current.ArtifactID != "" || current.ResourceID != "" {
+		return storagev1.Upload{}, empty, errors.New("Storage upload is not safely rotatable")
+	}
+	plan := nextUploadRotation(a, label, current)
+	key := uploadRotationKey(a, label, current.UploadID)
+	plan, err := effect(ctx, p, a, l, intentUploadRotate, key, plan, func(q uploadRotation) (uploadRotation, error) { return q, nil })
+	if err != nil {
+		return storagev1.Upload{}, empty, err
+	}
+	if plan != nextUploadRotation(a, label, current) {
+		return storagev1.Upload{}, empty, errors.New("persisted upload rotation bindings differ")
+	}
+	create := storagev1.CreateUploadRequest{Scope: job.Scope, Class: current.Class, SizeBytes: current.SizeBytes, SHA256: current.SHA256, IdempotencyKey: plan.Keys.Create}
+	upload, err := effect(ctx, p, a, l, store.IntentUploadCreate, plan.Keys.Create, create, func(q storagev1.CreateUploadRequest) (storagev1.Upload, error) { return p.storage.CreateUpload(ctx, q) })
+	if err != nil {
+		return storagev1.Upload{}, empty, err
+	}
+	if err = validateUpload(upload, job.Scope, current.Class, current.SizeBytes, current.SHA256); err != nil {
+		return storagev1.Upload{}, empty, err
+	}
+	return upload, plan.Keys, nil
+}
+
+func (p *Publisher) resumeUploadRotations(ctx context.Context, job generationv1.Job, a store.Attempt, l store.PublicationLease, label string, upload storagev1.Upload, keys uploadKeys) (storagev1.Upload, uploadKeys, int, error) {
+	rotations := 0
+	for {
+		current, err := p.storage.GetUpload(ctx, upload.UploadID)
+		if err != nil {
+			return storagev1.Upload{}, keys, rotations, err
+		}
+		if err = validateUpload(current, job.Scope, upload.Class, upload.SizeBytes, upload.SHA256); err != nil {
+			return storagev1.Upload{}, keys, rotations, err
+		}
+		markerKey := uploadRotationKey(a, label, current.UploadID)
+		previous, err := p.state.FindIntent(ctx, job.JobID, a.AttemptID, intentUploadRotate, markerKey)
+		if errors.Is(err, store.ErrNotFound) {
+			return current, keys, rotations, nil
+		}
+		if err != nil {
+			return storagev1.Upload{}, keys, rotations, err
+		}
+		if current.State == "committed" || current.ArtifactID != "" || current.ResourceID != "" {
+			return storagev1.Upload{}, keys, rotations, errors.New("committed Storage upload cannot be rotated")
+		}
+		if rotations >= maxUploadRotations {
+			return storagev1.Upload{}, keys, rotations, errors.New("Storage upload rotation limit exceeded")
+		}
+		expected := nextUploadRotation(a, label, current)
+		var recorded uploadRotation
+		if err = jsonvalue.Unmarshal(previous.Request, &recorded, 1<<20); err != nil || recorded != expected {
+			return storagev1.Upload{}, keys, rotations, errors.New("persisted upload rotation is invalid")
+		}
+		plan, planErr := effect(ctx, p, a, l, intentUploadRotate, markerKey, expected, func(q uploadRotation) (uploadRotation, error) { return q, nil })
+		if planErr != nil {
+			return storagev1.Upload{}, keys, rotations, planErr
+		}
+		if plan != expected {
+			return storagev1.Upload{}, keys, rotations, errors.New("persisted upload rotation bindings differ")
+		}
+		create := storagev1.CreateUploadRequest{Scope: job.Scope, Class: current.Class, SizeBytes: current.SizeBytes, SHA256: current.SHA256, IdempotencyKey: plan.Keys.Create}
+		upload, err = effect(ctx, p, a, l, store.IntentUploadCreate, plan.Keys.Create, create, func(q storagev1.CreateUploadRequest) (storagev1.Upload, error) { return p.storage.CreateUpload(ctx, q) })
+		if err != nil {
+			return storagev1.Upload{}, keys, rotations, err
+		}
+		if err = validateUpload(upload, job.Scope, current.Class, current.SizeBytes, current.SHA256); err != nil {
+			return storagev1.Upload{}, keys, rotations, err
+		}
+		keys = plan.Keys
+		rotations++
+	}
+}
+
+func (p *Publisher) putWithRotations(ctx context.Context, job generationv1.Job, a store.Attempt, l store.PublicationLease, upload storagev1.Upload, keys uploadKeys, rotationOffset int, label string, open func() (io.ReadCloser, error)) (storagev1.Upload, uploadKeys, int, error) {
+	current, currentKeys, chainRotations, err := p.resumeUploadRotations(ctx, job, a, l, label, upload, keys)
+	if err != nil {
+		return storagev1.Upload{}, currentKeys, rotationOffset + chainRotations, err
+	}
+	rotations := rotationOffset + chainRotations
+	if rotations > maxUploadRotations {
+		return storagev1.Upload{}, currentKeys, rotations, errors.New("Storage upload rotation limit exceeded")
+	}
+	for {
+		if err = p.put(ctx, job, a, l, current, currentKeys.Put, label, open); err == nil {
+			latest, getErr := p.storage.GetUpload(ctx, current.UploadID)
+			if getErr != nil {
+				return storagev1.Upload{}, currentKeys, rotations, getErr
+			}
+			if getErr = validateUpload(latest, job.Scope, current.Class, current.SizeBytes, current.SHA256); getErr != nil {
+				return storagev1.Upload{}, currentKeys, rotations, getErr
+			}
+			if latest.State != "uploaded" && latest.State != "committed" {
+				return storagev1.Upload{}, currentKeys, rotations, errors.New("Storage PUT receipt is not uploaded")
+			}
+			return latest, currentKeys, rotations, nil
+		}
+		if !writerExpired(err) || rotations >= maxUploadRotations {
+			return storagev1.Upload{}, currentKeys, rotations, err
+		}
+		current, err = p.latestRotatableUpload(ctx, job.Scope, current.Class, current.SizeBytes, current.SHA256, current)
+		if err != nil {
+			return storagev1.Upload{}, currentKeys, rotations, err
+		}
+		current, currentKeys, err = p.rotateUpload(ctx, job, a, l, label, current)
+		if err != nil {
+			return storagev1.Upload{}, currentKeys, rotations, err
+		}
+		rotations++
+	}
 }
 
 func (p *Publisher) saveDerived(ctx context.Context, job generationv1.Job, a store.Attempt, l store.PublicationLease, staged *sandbox.Output, r outputRecord) (string, error) {
@@ -347,31 +571,56 @@ func (p *Publisher) saveDerived(ctx context.Context, job generationv1.Job, a sto
 	refs := make([]storagev1.ResourceRef, 0, len(files))
 	for _, file := range files {
 		label := fmt.Sprintf("%s/%d/%s", file.Tree, file.FontIndex, file.Path)
-		create := storagev1.CreateUploadRequest{Scope: job.Scope, Class: storagev1.ClassResource, SizeBytes: file.Size, SHA256: file.SHA256, IdempotencyKey: stableKey(a, "resource/"+label)}
-		upload, e := effect(ctx, p, a, l, store.IntentUploadCreate, create.IdempotencyKey, create, func(q storagev1.CreateUploadRequest) (storagev1.Upload, error) { return p.storage.CreateUpload(ctx, q) })
+		keys := initialResourceUploadKeys(a, label)
+		create := storagev1.CreateUploadRequest{Scope: job.Scope, Class: storagev1.ClassResource, SizeBytes: file.Size, SHA256: file.SHA256, IdempotencyKey: keys.Create}
+		upload, e := effect(ctx, p, a, l, store.IntentUploadCreate, keys.Create, create, func(q storagev1.CreateUploadRequest) (storagev1.Upload, error) { return p.storage.CreateUpload(ctx, q) })
 		if e != nil {
 			return "", e
 		}
-		if e = p.put(ctx, job, a, l, upload, label, func() (io.ReadCloser, error) {
+		if e = validateUpload(upload, job.Scope, storagev1.ClassResource, file.Size, file.SHA256); e != nil {
+			return "", e
+		}
+		openResource := func() (io.ReadCloser, error) {
 			if staged == nil || staged.Derived == nil {
 				return nil, errors.New("resource bytes missing before Storage upload")
 			}
 			return staged.Derived.OpenVerified(file)
-		}); e != nil {
-			return "", e
 		}
-		commit := struct {
-			UploadID string                          `json:"uploadId"`
-			Request  storagev1.CommitResourceRequest `json:"request"`
-		}{upload.UploadID, storagev1.CommitResourceRequest{WriterToken: upload.WriterToken, IdempotencyKey: stableKey(a, "commit/"+label)}}
-		resource, e := effect(ctx, p, a, l, "resource.commit", commit.Request.IdempotencyKey, commit, func(q struct {
-			UploadID string                          `json:"uploadId"`
-			Request  storagev1.CommitResourceRequest `json:"request"`
-		}) (storagev1.Resource, error) {
-			return p.storage.CommitResource(ctx, q.UploadID, q.Request)
-		})
+		upload, keys, rotations, e := p.putWithRotations(ctx, job, a, l, upload, keys, 0, label, openResource)
 		if e != nil {
 			return "", e
+		}
+		var resource storagev1.Resource
+		for {
+			commit := struct {
+				UploadID string                          `json:"uploadId"`
+				Request  storagev1.CommitResourceRequest `json:"request"`
+			}{upload.UploadID, storagev1.CommitResourceRequest{WriterToken: upload.WriterToken, IdempotencyKey: keys.Commit}}
+			resource, e = effect(ctx, p, a, l, "resource.commit", keys.Commit, commit, func(q struct {
+				UploadID string                          `json:"uploadId"`
+				Request  storagev1.CommitResourceRequest `json:"request"`
+			}) (storagev1.Resource, error) {
+				return p.storage.CommitResource(ctx, q.UploadID, q.Request)
+			})
+			if e == nil {
+				break
+			}
+			if !writerExpired(e) || rotations >= maxUploadRotations {
+				return "", e
+			}
+			upload, e = p.latestRotatableUpload(ctx, job.Scope, storagev1.ClassResource, file.Size, file.SHA256, upload)
+			if e != nil {
+				return "", e
+			}
+			upload, keys, e = p.rotateUpload(ctx, job, a, l, label, upload)
+			if e != nil {
+				return "", e
+			}
+			rotations++
+			upload, keys, rotations, e = p.putWithRotations(ctx, job, a, l, upload, keys, rotations, label, openResource)
+			if e != nil {
+				return "", e
+			}
 		}
 		if resource.Scope != job.Scope || resource.SHA256 != file.SHA256 || resource.SizeBytes != file.Size || resource.Class != storagev1.ClassResource || resource.ResourceID == "" {
 			return "", errors.New("derived resource receipt differs")

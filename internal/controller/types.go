@@ -27,7 +27,7 @@ type Storage interface {
 	CommitResource(context.Context, string, storagev1.CommitResourceRequest) (storagev1.Resource, error)
 	CreateSnapshot(context.Context, storagev1.CreateSnapshotRequest) (storagev1.Snapshot, error)
 	FinalizeArtifact(context.Context, string, storagev1.FinalizeArtifactRequest) (storagev1.Artifact, error)
-	ReleasePin(context.Context, string) error
+	ReleasePinBound(context.Context, string, storagev1.PinReleaseRequest) (storagev1.PinReleaseReceipt, error)
 }
 type DerivedPinner interface {
 	EnsureDerivedPin(context.Context, generationv1.Job, string) error
