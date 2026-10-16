@@ -131,7 +131,7 @@ func runWorkflow(ctx context.Context, getenv func(string) string) error {
 }
 
 func runDispatcher(ctx context.Context, getenv func(string) string) error {
-	databaseURL, err := readDatabaseURL(getenv)
+	config, err := readAPIEnvironment(getenv)
 	if err != nil {
 		return err
 	}
@@ -139,11 +139,11 @@ func runDispatcher(ctx context.Context, getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	pool, state, err := service.OpenStore(ctx, databaseURL)
+	runtime, err := service.OpenRuntime(ctx, config.Runtime)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer runtime.Close()
 	temporalClient, err := client.DialContext(ctx, client.Options{HostPort: address, Namespace: namespace})
 	if err != nil {
 		return errors.New("Temporal is unavailable")
@@ -153,7 +153,7 @@ func runDispatcher(ctx context.Context, getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	dispatcher, err := orchestration.NewDispatcher(state, temporalClient, workerID)
+	dispatcher, err := orchestration.NewDispatcher(runtime.Store, temporalClient, workerID)
 	if err != nil {
 		return err
 	}

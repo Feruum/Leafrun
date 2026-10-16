@@ -1,0 +1,3 @@
+# Migration 003 must embed the exact LF bytes already qualified in the durable ledger.
+internal/store/migrations/003_e06_authority.sql text eol=lf
+internal/store/migrations/004_e06_audit.sql text eol=lf

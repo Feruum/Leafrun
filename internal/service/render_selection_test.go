@@ -101,7 +101,7 @@ func TestRenderSelectionReplayUsesOriginalReceiptAndResourcePinsPrecedeWorkflow(
 	resolved := validResolvedSelection(t, selection, selectionFingerprint, principal)
 	projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	resource := storagev1.Resource{ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: resolved.Prepared.Files[0].SHA256, SizeBytes: resolved.Prepared.Files[0].SizeBytes, CreatedAt: time.Now()}
-	server, err := New(state, state.Owner(), Config{
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true,
 		Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: selectionResources{"resource-file": resource}, Projects: projects,
 		OwnerToken: "owner-secret", EngineVersion: "0.15.1", Ready: func(context.Context) error { return nil },
 	})
@@ -196,7 +196,7 @@ func TestTerminalRenderSelectionReplayReturnsSavedAdmissionWithoutPinRecovery(t 
 	}
 	principal := storagev1.Principal{Subject: "user-1", Domain: "core"}
 	projects := &selectionProjects{execution: validResolvedSelection(t, selection, fingerprint, principal), current: projectsv1.CurrentReleaseDecision{Allowed: true}}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestRenderSelectionRecoversLostInputPinAcquireAcknowledgementAfterRestart(t
 	projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	resources := selectionResources{"resource-file": {ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: file.SHA256, SizeBytes: file.SizeBytes, CreatedAt: time.Now()}}
 	newServer := func() *Server {
-		server, newErr := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+		server, newErr := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 		if newErr != nil {
 			t.Fatal(newErr)
 		}
@@ -325,7 +325,7 @@ func TestRenderSelectionRotatesInputPinKeyOnlyForTypedExpiry(t *testing.T) {
 	file := resolved.Prepared.Files[0]
 	projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 	resources := selectionResources{"resource-file": {ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: file.SHA256, SizeBytes: file.SizeBytes, CreatedAt: time.Now()}}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": principal}, Access: access, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestExpiredInputResourceDoesNotRotatePinOrStartWorkflow(t *testing.T) {
 	resolved := validResolvedSelection(t, selection, fingerprint, principal)
 	file := resolved.Prepared.Files[0]
 	resources := selectionResources{"resource-file": {ResourceID: "resource-file", Scope: selection.Scope, Class: storagev1.ClassResource, SHA256: file.SHA256, SizeBytes: file.SizeBytes}}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestRenderWorkingSelectionRequiresSourceReadBeforeResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 	projects := &selectionProjects{execution: validResolvedSelection(t, selection, fingerprint, storagev1.Principal{Subject: "user-1", Domain: "core"})}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}}, Access: access, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}}, Access: access, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestRenderBundleSelectionCreatesNoAdmissionState(t *testing.T) {
 		t.Fatal(err)
 	}
 	projects := &selectionProjects{execution: projectsv1.ResolvedExecution{Descriptor: projectsv1.TargetDescriptor{Kind: "bundle"}}}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}}, Access: &testAccess{allowed: true}, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}}, Access: &testAccess{allowed: true}, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestRenderSelectionPreservesProjectsFieldPointersAndSafeMessage(t *testing.
 		t.Fatal(err)
 	}
 	projects := &selectionProjects{resolveErr: &projectsv1.HTTPError{Status: http.StatusUnprocessableEntity, Code: "invalid_selection", Message: "private validator detail", Fields: []projectsv1.FieldError{{File: "schema.json", Pointer: "/properties/title", Code: "required", Message: "title is required"}}}}
-	server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}}, Access: &testAccess{allowed: true}, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+	server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}}, Access: &testAccess{allowed: true}, Pins: pins, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 	if err != nil {
 		t.Fatal(err)
 	}

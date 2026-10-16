@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	auditv1 "github.com/leafrun/leafrun-contracts/audit/v1"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	"github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
@@ -53,6 +54,9 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 			if e = tx.QueryRow(ctx, `SELECT expires_at FROM generation_admission_receipts WHERE job_id=$1`, oldJob).Scan(&out.IdempotencyExpiresAt); e != nil {
 				return out, false, e
 			}
+			if e = s.gateRequestAuthority(ctx, tx, oldJob, true); e != nil {
+				return out, false, e
+			}
 			if e = commit(ctx, tx); e != nil {
 				return out, false, e
 			}
@@ -77,13 +81,25 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 		return out, false, e
 	}
 	var selectionRequest, selectionFingerprint any
+	var originalIdentity any
+	authorityRelease, authorityDigest := "", ""
+	if in.ResolvedExecution != nil {
+		authorityRelease = in.ResolvedExecution.ReleaseID
+		authorityDigest = in.ResolvedExecution.Descriptor.Digest
+	}
+	if in.Identity != nil {
+		originalIdentity, err = json.Marshal(in.Identity)
+		if err != nil {
+			return out, false, err
+		}
+	}
 	var actorSubject, actorDomain any = "", ""
 	if len(in.SelectionRequest) > 0 {
 		selectionRequest, selectionFingerprint = in.SelectionRequest, in.SelectionFingerprint
 		actorSubject, actorDomain = in.Actor.Subject, in.Actor.Domain
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO generation_jobs(job_id,workspace_id,project_id,initiator_id,idempotency_key,normalized_request,parameters,fingerprint,source_snapshot_id,source_content_id,target_id,entrypoint,engine_version,status,phase,deadline,selection_request,selection_fingerprint,actor_subject,actor_domain)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'queued','pin_pending',clock_timestamp()+interval '15 minutes',$14,$15,$16,$17)`, jobID, in.WorkspaceID, in.ProjectID, in.InitiatorID, in.IdempotencyKey, in.NormalizedRequest, in.Parameters, in.Fingerprint, in.SnapshotID, in.SourceContentID, in.TargetID, in.Entrypoint, in.EngineVersion, selectionRequest, selectionFingerprint, actorSubject, actorDomain)
+	_, err = tx.Exec(ctx, `INSERT INTO generation_jobs(job_id,workspace_id,project_id,initiator_id,idempotency_key,normalized_request,parameters,fingerprint,source_snapshot_id,source_content_id,target_id,entrypoint,engine_version,status,phase,deadline,selection_request,selection_fingerprint,actor_subject,actor_domain,original_identity,authority_release_id,authority_descriptor_digest)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'queued','pin_pending',clock_timestamp()+interval '15 minutes',$14,$15,$16,$17,$18::jsonb,$19,$20)`, jobID, in.WorkspaceID, in.ProjectID, in.InitiatorID, in.IdempotencyKey, in.NormalizedRequest, in.Parameters, in.Fingerprint, in.SnapshotID, in.SourceContentID, in.TargetID, in.Entrypoint, in.EngineVersion, selectionRequest, selectionFingerprint, actorSubject, actorDomain, originalIdentity, authorityRelease, authorityDigest)
 	if err != nil {
 		return out, false, fmt.Errorf("insert generation job: %w", err)
 	}
@@ -99,6 +115,15 @@ func (s *Store) Admit(ctx context.Context, in AdmitInput) (generationv1.Admissio
 	j, e := scanJob(tx.QueryRow(ctx, jobSelect+` WHERE job_id=$1`, jobID))
 	if e != nil {
 		return out, false, e
+	}
+	if err = s.captureAuditContext(ctx, tx, jobID); err != nil {
+		return out, false, err
+	}
+	if err = s.enqueueJobAudit(ctx, tx, jobID, uint64(j.version), j.createdAt, auditv1.ActionGenerationAdmission, auditv1.OutcomeAdmitted); err != nil {
+		return out, false, err
+	}
+	if err = s.gateRequestAuthority(ctx, tx, jobID, false); err != nil {
+		return out, false, err
 	}
 	if err = commit(ctx, tx); err != nil {
 		return out, false, err
@@ -138,6 +163,9 @@ func admissionReceiptFingerprint(in AdmitInput) string {
 }
 
 func validateAdmission(in AdmitInput) error {
+	if in.Identity != nil && (in.Identity.Validate() != nil || in.Identity.Authority.Kind == "service" || in.Identity.Authority.Kind == "dev" || in.Actor != (storagev1.Principal{}) && in.Identity.Principal != in.Actor) {
+		return ErrAuthorityDenied
+	}
 	if in.WorkspaceID == "" || in.ProjectID == "" || in.InitiatorID == "" || !generationv1.ValidIdempotencyKey(in.IdempotencyKey) {
 		return errors.New("workspace, project, initiator and valid idempotency key are required")
 	}
@@ -712,6 +740,9 @@ func (s *Store) MarkPinActiveAndRecordWorkflowStart(ctx context.Context, jobID, 
 			return err
 		}
 	}
+	if err = s.gatePinAuthority(ctx, tx, jobID, pin.ExpiresAt); err != nil {
+		return err
+	}
 	return commit(ctx, tx)
 }
 
@@ -789,6 +820,9 @@ func (s *Store) MarkPinActive(ctx context.Context, jobID, key string, pin storag
 	if _, err = tx.Exec(ctx, `UPDATE generation_pin_acquires SET response=$3::jsonb,storage_pin_id=$4,expires_at=$5,state='active',updated_at=clock_timestamp() WHERE job_id=$1 AND idempotency_key=$2`, jobID, key, encoded, pin.PinID, pin.ExpiresAt); err != nil {
 		return err
 	}
+	if err = s.gatePinAuthority(ctx, tx, jobID, pin.ExpiresAt); err != nil {
+		return err
+	}
 	return commit(ctx, tx)
 }
 
@@ -859,6 +893,9 @@ func (s *Store) MarkInputPinActive(ctx context.Context, jobID, key string, pin s
 	if _, err = tx.Exec(ctx, `UPDATE generation_input_resources SET pin_id=$3,pin_state='active' WHERE job_id=$1 AND acquisition_key=$2 AND resource_id=$4`, jobID, key, pin.PinID, pin.ObjectID); err != nil {
 		return err
 	}
+	if err = s.gatePinAuthority(ctx, tx, jobID, pin.ExpiresAt); err != nil {
+		return err
+	}
 	return commit(ctx, tx)
 }
 
@@ -898,7 +935,7 @@ func (s *Store) ClaimWorkflowStarts(ctx context.Context, worker string, limit in
 	}
 	rows, err := tx.Query(ctx, `SELECT w.job_id,w.workflow_id,w.request,w.state,w.lease_owner,w.lease_epoch,w.lease_until,w.created_at FROM generation_workflow_starts w JOIN generation_jobs j ON j.job_id=w.job_id
 		WHERE w.state='pending' AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND j.deadline>clock_timestamp() AND NOT j.cancellation_requested AND j.terminal_at IS NULL
-		ORDER BY w.created_at,w.job_id FOR UPDATE OF w SKIP LOCKED LIMIT $1`, limit)
+		ORDER BY w.created_at,w.job_id FOR UPDATE OF j,w SKIP LOCKED LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -917,6 +954,15 @@ func (s *Store) ClaimWorkflowStarts(ctx context.Context, worker string, limit in
 	}
 	for i := range out {
 		if err = tx.QueryRow(ctx, `UPDATE generation_workflow_starts SET lease_owner=$2,lease_epoch=lease_epoch+1,lease_until=clock_timestamp()+$3*interval '1 microsecond' WHERE job_id=$1 RETURNING lease_owner,lease_epoch,lease_until`, out[i].JobID, worker, lease.Microseconds()).Scan(&out[i].LeaseOwner, &out[i].LeaseEpoch, &out[i].LeaseUntil); err != nil {
+			return nil, err
+		}
+	}
+	for _, item := range out {
+		if err = s.gateAuthority(ctx, tx, item.JobID, "generation.execute"); err != nil {
+			if errors.Is(err, ErrAuthorityDenied) {
+				_ = tx.Rollback(ctx)
+				return nil, errors.Join(err, s.FailJob(ctx, TerminalInput{JobID: item.JobID, Phase: "access", FailureCode: "access_denied"}))
+			}
 			return nil, err
 		}
 	}

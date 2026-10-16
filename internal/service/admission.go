@@ -13,9 +13,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/Feruum/Leafrun/internal/store"
+	accessv1 "github.com/leafrun/leafrun-contracts/access/v1"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
+	"github.com/leafrun/leafrun-platform/authn"
 )
 
 const (
@@ -50,10 +52,72 @@ func New(state AdmissionStore, owner OwnerStore, config Config) (*Server, error)
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	return &Server{store: state, owner: owner, cfg: config}, nil
+	server := &Server{store: state, owner: owner, cfg: config}
+	if config.AuthMode == "access" {
+		audited, ok := state.(interface {
+			SetAuditScopeGate(store.AuditScopeGate)
+			SetAuditCleanupGate(store.AuditCleanupGate)
+		})
+		if !ok {
+			return nil, errors.New("transactional audit store required")
+		}
+		if _, ok = config.Access.(canonicalScopeChecker); !ok {
+			return nil, errors.New("canonical Access scope required")
+		}
+		audited.SetAuditScopeGate(server.auditScopeGate)
+		audited.SetAuditCleanupGate(server.auditCleanupGate)
+	}
+	return server, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/v1/") && s.cfg.AuthMode == "access" {
+		cookieName := s.cfg.CookieName
+		if cookieName == "" {
+			cookieName = authn.DefaultSessionCookieName
+		}
+		selected, transport, err := authn.SelectCredentialsWithCookieNames(r, authn.ConfiguredCookieNames(cookieName, s.cfg.GuestCookieName))
+		if err == nil {
+			for _, secret := range append([]string{s.cfg.OwnerToken}, s.cfg.InternalTokens...) {
+				if secret != "" && (selected.Bearer == secret || selected.SessionCookie == secret) {
+					err = accessv1.ErrUnauthenticated
+					break
+				}
+			}
+		}
+		if err == nil {
+			if s.cfg.BrowserGuard.Check(r, transport) != nil {
+				err = accessv1.ErrDenied
+			}
+		}
+		if err != nil {
+			if errors.Is(err, accessv1.ErrDenied) {
+				writeAPIError(w, 403, "forbidden", "Browser request is denied")
+			} else {
+				writeAPIError(w, 401, "unauthorized", "Authentication is required")
+			}
+			return
+		}
+		id, err := s.cfg.Authenticator.Authenticate(r.Context(), r)
+		if err != nil {
+			if errors.Is(err, accessv1.ErrUnauthenticated) {
+				writeAPIError(w, 401, "unauthorized", "Authentication is required")
+			} else {
+				writeAPIError(w, 503, "access_unavailable", "Authentication is temporarily unavailable")
+			}
+			return
+		}
+		if id.Authority.Kind == "service" || id.Authority.Kind == "dev" || strings.EqualFold(id.Principal.Domain, "service") {
+			writeAPIError(w, 401, "unauthorized", "Authentication is required")
+			return
+		}
+		ctx, err := authn.WithIdentity(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, 503, "access_unavailable", "Authentication is temporarily unavailable")
+			return
+		}
+		r = r.WithContext(ctx)
+	}
 	switch {
 	case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 		w.WriteHeader(http.StatusNoContent)
@@ -121,6 +185,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input := store.AdmitInput{
+		Identity:    requestIdentity(r.Context()),
 		WorkspaceID: request.Scope.WorkspaceID, ProjectID: request.Scope.ProjectID,
 		InitiatorID: initiatorID, IdempotencyKey: key, NormalizedRequest: normalized,
 		Parameters: request.Parameters, Fingerprint: fingerprint, EngineVersion: s.cfg.EngineVersion,
@@ -176,20 +241,41 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "admission_pending", "The job is saved and can be retried with the same idempotency key")
 		return
 	}
+	if err = s.redactSourceFields(r.Context(), principal, &admission.Job); err != nil {
+		writeAPIError(w, 503, "access_unavailable", "Access checks are temporarily unavailable")
+		return
+	}
 	writeJSON(w, http.StatusAccepted, admission)
 }
 
 // EnsureSourcePin recovers one admission from its persisted pin intent. It is
 // shared by HTTP retries and the admission reconciler.
 func (s *Server) EnsureSourcePin(ctx context.Context, job generationv1.Job) error {
+	var restoreErr error
+	ctx, restoreErr = s.restoreAuthority(ctx, job.JobID)
+	if restoreErr != nil {
+		return s.failDeniedAdmission(ctx, job.JobID, restoreErr)
+	}
+	if err := s.checkOriginal(ctx, job.JobID, job.Scope.WorkspaceID, job.Scope.ProjectID, "generation.create", job.JobID); err != nil {
+		return s.failDeniedAdmission(ctx, job.JobID, err)
+	}
 	active, err := s.store.AdmissionActivated(ctx, job.JobID)
 	if err != nil || active {
 		return err
 	}
 	if err = s.ensureInputPins(ctx, job); err != nil {
-		return err
+		return s.failDeniedAdmission(ctx, job.JobID, err)
 	}
-	return s.ensureSnapshotPin(ctx, job, job.SourceSnapshotID, true)
+	return s.failDeniedAdmission(ctx, job.JobID, s.ensureSnapshotPin(ctx, job, job.SourceSnapshotID, true))
+}
+
+func (s *Server) failDeniedAdmission(ctx context.Context, jobID string, err error) error {
+	if errors.Is(err, store.ErrAuthorityDenied) {
+		if state, ok := s.store.(failedAdmissionStore); ok {
+			return errors.Join(err, state.FailJob(context.WithoutCancel(ctx), store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"}))
+		}
+	}
+	return err
 }
 
 type inputPinAdmissionStore interface {
@@ -261,6 +347,9 @@ func (s *Server) ensureInputPin(ctx context.Context, state inputPinAdmissionStor
 				return fmt.Errorf("read input resource pin: %w", err)
 			}
 		} else {
+			if err = s.checkOriginal(ctx, job.JobID, job.Scope.WorkspaceID, job.Scope.ProjectID, "generation.execute", request.ObjectID); err != nil {
+				return err
+			}
 			pin, err = s.cfg.Pins.AcquirePin(ctx, request)
 			if isExpiredPinError(err) {
 				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, latest.Key); e != nil {
@@ -280,6 +369,9 @@ func (s *Server) ensureInputPin(ctx context.Context, state inputPinAdmissionStor
 		}
 		if err = s.store.RecordPinAcquireResponse(ctx, job.JobID, latest.Key, pin); err != nil {
 			return fmt.Errorf("persist input resource pin receipt: %w", err)
+		}
+		if err = s.checkOriginal(ctx, job.JobID, job.Scope.WorkspaceID, job.Scope.ProjectID, "generation.execute", pin.ObjectID); err != nil {
+			return err
 		}
 		activated, activateErr := s.cfg.Pins.ActivatePin(ctx, pin.PinID)
 		if activateErr != nil {
@@ -348,6 +440,11 @@ func (s *Server) EnsureDerivedPin(ctx context.Context, job generationv1.Job, sna
 	if snapshotID == "" || snapshotID == job.SourceSnapshotID {
 		return errors.New("a distinct derived snapshot ID is required")
 	}
+	var err error
+	ctx, err = s.restoreAuthority(ctx, job.JobID)
+	if err != nil {
+		return err
+	}
 	return s.ensureSnapshotPin(ctx, job, snapshotID, false)
 }
 
@@ -396,6 +493,9 @@ func (s *Server) ensureSnapshotPin(ctx context.Context, job generationv1.Job, sn
 				return fmt.Errorf("read source pin: %w", err)
 			}
 		} else {
+			if err = s.checkOriginal(ctx, job.JobID, job.Scope.WorkspaceID, job.Scope.ProjectID, "generation.execute", request.ObjectID); err != nil {
+				return err
+			}
 			pin, err = s.cfg.Pins.AcquirePin(ctx, request)
 			if isExpiredPinError(err) {
 				if e := s.store.RecordPinAcquireExpired(ctx, job.JobID, acquire.Key); e != nil {
@@ -415,6 +515,9 @@ func (s *Server) ensureSnapshotPin(ctx context.Context, job generationv1.Job, sn
 		}
 		// Storage checks expiry as well as state when activation is repeated for
 		// an already-active pin, so its response remains authoritative here.
+		if err = s.checkOriginal(ctx, job.JobID, job.Scope.WorkspaceID, job.Scope.ProjectID, "generation.execute", pin.ObjectID); err != nil {
+			return err
+		}
 		activated, activateErr := s.cfg.Pins.ActivatePin(ctx, pin.PinID)
 		if activateErr != nil {
 			if isExpiredPinError(activateErr) {

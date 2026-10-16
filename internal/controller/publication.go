@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Feruum/Leafrun/internal/service"
+	identityv1 "github.com/leafrun/leafrun-contracts/identity/v1"
 	"io"
 	"path/filepath"
 	"reflect"
@@ -134,6 +136,10 @@ func (p *Publisher) Publish(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
+	ctx, err = service.RestoreExecutionAuthority(ctx, input)
+	if err != nil {
+		return err
+	}
 	allowed, err := p.checkAccess(ctx, job, input, "generation.publish")
 	if err != nil {
 		return err
@@ -190,6 +196,9 @@ func (p *Publisher) Publish(ctx context.Context, jobID string) error {
 		diagnostics = []byte("[]")
 	}
 	err = p.state.TerminalSuccess(publishCtx, store.SuccessInput{JobID: jobID, Publisher: lease.Owner, PublicationEpoch: lease.Epoch, CandidateID: candidate.CandidateID, Artifact: candidate.Artifact, Diagnostics: diagnostics, RawDiagnostics: record.Terminal.RawDiagnostics})
+	if errors.Is(err, store.ErrAuthorityDenied) {
+		return p.state.FailPublication(publishCtx, lease.Owner, lease.Epoch, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
+	}
 	if err == nil && a.StopConfirmed && privateToken.MatchString(a.StagingToken) && filepath.Clean(a.PrivateStagingPath) == filepath.Join(filepath.Clean(p.cfg.StagingRoot), a.StagingToken) {
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), controllerCallTimeout)
 		scheduleErr := p.state.ScheduleAttemptCleanup(cleanupCtx, a.AttemptID)
@@ -219,7 +228,11 @@ func (p *Publisher) selectionStillAuthorized(ctx context.Context, job generation
 		if p.cfg.Projects == nil {
 			return false, errors.New("Projects release publication check is unavailable")
 		}
-		decision, checkErr := p.cfg.Projects.CurrentRelease(ctx, projectsv1.CurrentReleaseCheck{Actor: principal, Scope: job.Scope, ReleaseID: input.Execution.ReleaseID, DescriptorDigest: input.Execution.Descriptor.Digest})
+		var authority *identityv1.AuthorityRef
+		if input.Identity != nil {
+			authority = &input.Identity.Authority
+		}
+		decision, checkErr := p.cfg.Projects.CurrentRelease(ctx, projectsv1.CurrentReleaseCheck{Authority: authority, Actor: principal, Scope: job.Scope, ReleaseID: input.Execution.ReleaseID, DescriptorDigest: input.Execution.Descriptor.Digest})
 		if checkErr != nil {
 			return false, checkErr
 		}
@@ -340,6 +353,20 @@ func (p *Publisher) finalize(ctx context.Context, job generationv1.Job, a store.
 			return candidate, errors.New("finalize upload is not ready")
 		}
 		artifact, err = effect(ctx, p, a, l, store.IntentArtifactFinalize, currentKeys.Finalize, final, func(q finalizeIntent) (storagev1.Artifact, error) {
+			allowed, checkErr := p.checkAccess(ctx, job, in, "generation.publish")
+			if checkErr != nil {
+				return storagev1.Artifact{}, checkErr
+			}
+			if !allowed {
+				return storagev1.Artifact{}, store.ErrAuthorityDenied
+			}
+			allowed, checkErr = p.selectionStillAuthorized(ctx, job, in)
+			if checkErr != nil {
+				return storagev1.Artifact{}, checkErr
+			}
+			if !allowed {
+				return storagev1.Artifact{}, store.ErrAuthorityDenied
+			}
 			return p.storage.FinalizeArtifact(ctx, q.UploadID, q.Request)
 		})
 		if err == nil {

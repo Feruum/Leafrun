@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 
 	"github.com/Feruum/Leafrun/internal/store"
@@ -13,6 +12,7 @@ import (
 	"github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
+	"github.com/leafrun/leafrun-platform/authn"
 )
 
 func (s *Server) createRender(w http.ResponseWriter, r *http.Request) {
@@ -64,10 +64,27 @@ func (s *Server) createRender(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "projects_unavailable", "Project resolution is temporarily unavailable")
 		return
 	}
-	resolveRequest := projectsv1.ResolveRequest{Actor: principal, Selection: selection, SelectionFingerprint: selectionFingerprint}
+	resolveRequest := projectsv1.ResolveRequest{Authority: authorityRef(r.Context()), Actor: principal, Selection: selection, SelectionFingerprint: selectionFingerprint}
 	resolved, err := s.cfg.Projects.Resolve(r.Context(), resolveRequest)
 	if err != nil {
-		s.writeProjectsError(w, err)
+		visible, checkErr := s.checkAccess(r.Context(), principal, selection.Scope, "source.read", selection.SnapshotID)
+		if checkErr != nil {
+			writeAPIError(w, 503, "access_unavailable", "Access checks are temporarily unavailable")
+			return
+		}
+		if visible {
+			for _, ref := range selection.FileRefs {
+				allowed, err := s.checkAccess(r.Context(), principal, selection.Scope, "resource.read", ref.ResourceID)
+				if err != nil {
+					writeAPIError(w, 503, "access_unavailable", "Access checks are temporarily unavailable")
+					return
+				}
+				if !allowed {
+					visible = false
+				}
+			}
+		}
+		s.writeProjectsError(w, err, visible)
 		return
 	}
 	if resolved.Descriptor.Kind == "bundle" {
@@ -103,6 +120,7 @@ func (s *Server) createRender(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input := store.AdmitInput{
+		Identity:    requestIdentity(r.Context()),
 		WorkspaceID: workspace, ProjectID: project, InitiatorID: initiatorID, Actor: principal,
 		IdempotencyKey: key, NormalizedRequest: resolvedBytes, Parameters: append([]byte(nil), resolved.Prepared.JSON...),
 		Fingerprint: executionFingerprint, SelectionRequest: selectionBytes, SelectionFingerprint: selectionFingerprint,
@@ -112,7 +130,8 @@ func (s *Server) createRender(w http.ResponseWriter, r *http.Request) {
 	}
 	if selection.ReleaseID != "" {
 		decision, checkErr := s.cfg.Projects.CurrentRelease(r.Context(), projectsv1.CurrentReleaseCheck{
-			Actor: principal, Scope: resolved.Scope, ReleaseID: resolved.ReleaseID, DescriptorDigest: resolved.Descriptor.Digest,
+			Authority: authorityRef(r.Context()),
+			Actor:     principal, Scope: resolved.Scope, ReleaseID: resolved.ReleaseID, DescriptorDigest: resolved.Descriptor.Digest,
 		})
 		if checkErr != nil {
 			writeAPIError(w, http.StatusServiceUnavailable, "projects_unavailable", "Release checks are temporarily unavailable")
@@ -132,8 +151,7 @@ func (s *Server) createRender(w http.ResponseWriter, r *http.Request) {
 }
 
 func readRenderSelection(w http.ResponseWriter, r *http.Request) (generationv1.RenderSelectionRequest, []byte, string, error) {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" || r.ContentLength > jsonvalue.MaxBytes {
+	if err := authn.RequireMediaType(r, "application/json"); err != nil || r.ContentLength > jsonvalue.MaxBytes {
 		return generationv1.RenderSelectionRequest{}, nil, "", errors.New("application/json selection body is required")
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, jsonvalue.MaxBytes))
@@ -234,7 +252,7 @@ func inputResourceIntents(resources []projectsv1.InputResource) ([]store.InputRe
 	return out, nil
 }
 
-func (s *Server) writeProjectsError(w http.ResponseWriter, err error) {
+func (s *Server) writeProjectsError(w http.ResponseWriter, err error, sourceVisible ...bool) {
 	var response *projectsv1.HTTPError
 	if !errors.As(err, &response) {
 		writeAPIError(w, http.StatusServiceUnavailable, "projects_unavailable", "Project resolution is temporarily unavailable")
@@ -259,8 +277,10 @@ func (s *Server) writeProjectsError(w http.ResponseWriter, err error) {
 		}
 	}
 	fields := make([]generationv1.FieldError, 0, len(response.Fields))
-	for _, field := range response.Fields {
-		fields = append(fields, generationv1.FieldError{File: field.File, Pointer: field.Pointer, Code: field.Code, Message: field.Message})
+	if len(sourceVisible) == 1 && sourceVisible[0] {
+		for _, field := range response.Fields {
+			fields = append(fields, generationv1.FieldError{File: field.File, Pointer: field.Pointer, Code: field.Code, Message: field.Message})
+		}
 	}
 	writeAPIErrorFields(w, status, code, message, fields)
 }

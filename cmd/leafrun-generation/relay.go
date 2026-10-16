@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Feruum/Leafrun/internal/service"
+	auditv1 "github.com/leafrun/leafrun-contracts/audit/v1"
 	"github.com/leafrun/leafrun-platform/events"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -45,7 +46,7 @@ func runEventRelay(ctx context.Context, getenv func(string) string) error {
 		return err
 	}
 	defer pool.Close()
-	connection, err := nats.Connect(config.Address, nats.UserInfo(config.User, config.Password), nats.Name("leafrun-generation-relay"), nats.Timeout(5*time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second))
+	connection, err := nats.Connect(config.Address, nats.UserInfo(config.User, config.Password), nats.CustomInboxPrefix("_INBOX.generation"), nats.Name("leafrun-generation-relay"), nats.Timeout(5*time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second))
 	if err != nil {
 		return errors.New("Generation event broker is unavailable")
 	}
@@ -54,7 +55,11 @@ func runEventRelay(ctx context.Context, getenv func(string) string) error {
 	if err != nil {
 		return errors.New("Generation JetStream client could not start")
 	}
-	relay := events.Relay{DB: pool, Publisher: events.JetStreamPublisher{Client: broker}}
+	publisher, err := events.NewOwnerAuditPublisher(events.JetStreamPublisher{Client: broker}, auditv1.ProducerGeneration, []string{events.GenerationCompletedSubject})
+	if err != nil {
+		return err
+	}
+	relay := events.Relay{DB: pool, Publisher: publisher}
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for ctx.Err() == nil {

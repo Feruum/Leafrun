@@ -10,13 +10,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/leafrun/leafrun-platform/events"
 )
 
 //go:embed migrations/*.sql
@@ -109,8 +108,13 @@ type execer interface {
 // Store uses one Generation database. The same database transaction also
 // records Platform outbox events.
 type Store struct {
-	pool *pgxpool.Pool
-	cfg  Config
+	pool                 *pgxpool.Pool
+	cfg                  Config
+	gateMu               sync.RWMutex
+	authorityGate        AuthorityGate
+	requestAuthorityGate RequestAuthorityGate
+	auditScopeGate       AuditScopeGate
+	auditCleanupGate     AuditCleanupGate
 }
 
 func New(pool *pgxpool.Pool, config Config) (*Store, error) {
@@ -122,28 +126,6 @@ func New(pool *pgxpool.Pool, config Config) (*Store, error) {
 		return nil, err
 	}
 	return &Store{pool: pool, cfg: cfg}, nil
-}
-
-// Migrate applies the shared outbox schema and Generation-owned schema.
-func (s *Store) Migrate(ctx context.Context) error {
-	if err := events.ApplyMigration(ctx, s.pool); err != nil {
-		return err
-	}
-	sql, err := fs.ReadFile(migrations, "migrations/001_generation.sql")
-	if err != nil {
-		return fmt.Errorf("read generation migration: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("apply generation migration: %w", err)
-	}
-	sql, err = fs.ReadFile(migrations, "migrations/002_e05_render_selection.sql")
-	if err != nil {
-		return fmt.Errorf("read Generation E05 migration: %w", err)
-	}
-	if _, err = s.pool.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("apply Generation E05 migration: %w", err)
-	}
-	return nil
 }
 
 func newID(prefix string) (string, error) {

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
+	"github.com/leafrun/leafrun-platform/authn"
 )
 
 type apiError struct {
@@ -26,6 +26,10 @@ type apiError struct {
 }
 
 func (s *Server) authenticate(r *http.Request) (storagev1.Principal, bool) {
+	if s.cfg.AuthMode == "access" {
+		id, ok := authn.IdentityFromContext(r.Context())
+		return id.Principal, ok
+	}
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
 		return storagev1.Principal{}, false
@@ -38,11 +42,11 @@ func (s *Server) authenticate(r *http.Request) (storagev1.Principal, bool) {
 }
 
 func (s *Server) authenticateOwner(r *http.Request) bool {
-	values := r.Header.Values("Authorization")
-	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+	in, err := authn.CredentialsWithCookieNames(r, authn.ConfiguredCookieNames(s.cfg.CookieName, s.cfg.GuestCookieName))
+	if err != nil || in.SessionCookie != "" {
 		return false
 	}
-	token := strings.TrimPrefix(values[0], "Bearer ")
+	token := in.Bearer
 	return len(token) == len(s.cfg.OwnerToken) && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.OwnerToken)) == 1
 }
 
@@ -50,13 +54,22 @@ func (s *Server) checkAccess(ctx context.Context, principal storagev1.Principal,
 	if operation == "" {
 		return false, errors.New("Access operation is required")
 	}
-	return s.cfg.Access.Check(ctx, storagev1.AccessCheck{Principal: principal, Scope: scope, Operation: operation, ObjectID: objectID})
+	in := storagev1.AccessCheck{Principal: principal, Scope: scope, Operation: operation, ObjectID: objectID}
+	if id, ok := authn.IdentityFromContext(ctx); ok {
+		if id.Principal != principal {
+			return false, errors.New("identity binding mismatch")
+		}
+		ref := id.Authority
+		in.Authority = &ref
+	} else if s.cfg.AuthMode == "access" {
+		return false, errors.New("current authority required")
+	}
+	return s.cfg.Access.Check(ctx, in)
 }
 
 func readCreateRequest(w http.ResponseWriter, r *http.Request) (generationv1.CreateJobRequest, []byte, string, error) {
 	var request generationv1.CreateJobRequest
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
+	if err := authn.RequireMediaType(r, "application/json"); err != nil {
 		return request, nil, "", errors.New("application/json content type is required")
 	}
 	if r.ContentLength > jsonvalue.MaxBytes {
@@ -125,6 +138,9 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, jobID string) {
 		return
 	}
 	allowed, err := s.checkAccess(r.Context(), principal, job.Scope, "generation.read", job.JobID)
+	if err == nil && allowed {
+		allowed, err = s.jobCallerBinding(r.Context(), principal, job)
+	}
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "access_unavailable", "Access checks are temporarily unavailable")
 		return
@@ -141,6 +157,13 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, jobID string) {
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Body != nil {
+		b, err := io.ReadAll(io.LimitReader(r.Body, 1))
+		if err != nil || len(b) != 0 {
+			writeAPIError(w, 400, "invalid_request", "Cancellation requires an empty body")
+			return
+		}
+	}
 	principal, ok := s.authenticate(r)
 	if !ok {
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required")
@@ -152,6 +175,9 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request, jobID string)
 		return
 	}
 	allowed, err := s.checkAccess(r.Context(), principal, job.Scope, "generation.cancel", job.JobID)
+	if err == nil && allowed {
+		allowed, err = s.jobCallerBinding(r.Context(), principal, job)
+	}
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "access_unavailable", "Access checks are temporarily unavailable")
 		return
@@ -181,12 +207,53 @@ func (s *Server) redactSourceFields(ctx context.Context, principal storagev1.Pri
 	if err != nil {
 		return err
 	}
+	// Native diagnostics/prepared JSON can depend on independently selected
+	// file resources. Historical visibility does not require their pins active.
+	if allowed {
+		if state, ok := s.store.(authorityLoader); ok {
+			binding, loadErr := state.LoadAuthority(ctx, job.JobID)
+			if loadErr != nil {
+				return loadErr
+			}
+			for _, ref := range binding.Resources {
+				var checkErr error
+				allowed, checkErr = s.checkAccess(ctx, principal, ref.Scope, "resource.read", ref.ResourceID)
+				if checkErr != nil {
+					return checkErr
+				}
+				if !allowed {
+					break
+				}
+			}
+		} else if s.cfg.AuthMode == "access" {
+			allowed = false
+		}
+	}
 	if !allowed {
 		job.Diagnostics = nil
 		job.RawDiagnostics = ""
 		job.Parameters = nil
+		job.Entrypoint = ""
+		job.DiagnosticsVisibility = "restricted"
+		job.Phase = safePhase(job.Phase)
+		job.FailureCode = safeFailureCode(job.FailureCode)
 	}
 	return nil
+}
+
+func safePhase(phase string) string {
+	switch phase {
+	case "pin_pending", "workflow_pending", "queued", "preparing", "rendering", "publishing", "completed", "complete", "compile", "export", "storage", "infrastructure", "access", "publication", "render", "resource_limit", "timeout", "canceling", "cancelling":
+		return phase
+	}
+	return "completed"
+}
+func safeFailureCode(code string) string {
+	switch code {
+	case "", "typst_compile_failed", "compile_failed", "typst_export_failed", "export_failed", "access_denied", "resource_limit", "timeout", "renderer_failure", "artifact_expired", "artifact_upload_failed", "staging_unavailable", "render_failed", "canceled", "expired":
+		return code
+	}
+	return "render_failed"
 }
 
 func (s *Server) publishable(w http.ResponseWriter, r *http.Request) {
@@ -240,8 +307,7 @@ func (s *Server) pinOwner(w http.ResponseWriter, r *http.Request) {
 }
 
 func readStrictJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
+	if err := authn.RequireMediaType(r, "application/json"); err != nil {
 		return errors.New("application/json content type required")
 	}
 	if r.ContentLength > jsonvalue.MaxBytes {
@@ -256,6 +322,8 @@ func readStrictJSON(w http.ResponseWriter, r *http.Request, target any) error {
 
 func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrAuthorityDenied):
+		writeAPIError(w, http.StatusForbidden, "forbidden", "Access is denied")
 	case errors.Is(err, store.ErrNotFound):
 		writeAPIError(w, http.StatusNotFound, "not_found", "The requested resource was not found")
 	case errors.Is(err, store.ErrConflict):

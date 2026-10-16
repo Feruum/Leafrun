@@ -32,6 +32,9 @@ func (s *Store) LookupAdmission(ctx context.Context, workspaceID, initiatorID, k
 	if err != nil {
 		return generationv1.Admission{}, false, err
 	}
+	if err = s.gateRequestAuthority(ctx, tx, jobID, true); err != nil {
+		return generationv1.Admission{}, false, err
+	}
 	if err = commit(ctx, tx); err != nil {
 		return generationv1.Admission{}, false, err
 	}

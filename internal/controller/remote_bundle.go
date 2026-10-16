@@ -32,6 +32,7 @@ type remoteSnapshotBundle struct {
 	descriptors map[snapshotFileKey]renderwire.FileDescriptor
 	mu          sync.Mutex
 	err         error
+	beforeOpen  func() error
 }
 
 func newRemoteSnapshotBundle(ctx context.Context, storage Storage, snapshot storagev1.Snapshot, job generationJobIdentity) (*remoteSnapshotBundle, renderwire.Bundle, error) {
@@ -103,6 +104,11 @@ func (view remoteSnapshotFS) Open(name string) (fs.File, error) {
 	file, ok := view.bundle.descriptors[key]
 	if !ok {
 		return nil, errors.New("source descriptor disappeared from its immutable manifest")
+	}
+	if view.bundle.beforeOpen != nil {
+		if err := view.bundle.beforeOpen(); err != nil {
+			return nil, err
+		}
 	}
 	response, err := view.bundle.storage.ResourceContent(view.bundle.ctx, resourceID)
 	if err != nil {

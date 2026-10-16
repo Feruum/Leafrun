@@ -85,7 +85,7 @@ func TestPostgresHTTPAdmissionPreflightsAndPreservesReceiptAfterSourceExpiry(t *
 	access := &testAccess{allowed: true}
 	pins := &testPins{}
 	configureTestSnapshot(t, pins)
-	handler, err := New(state, state.Owner(), Config{
+	handler, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true,
 		Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
 		Access:      access, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
 		Ready: func(context.Context) error { return nil },
@@ -142,7 +142,7 @@ func TestPostgresHTTPEntrypointFailureDoesNotReserveQueue(t *testing.T) {
 	state := openHTTPStoreTest(t)
 	pins := &testPins{}
 	configureTestSnapshot(t, pins)
-	handler, err := New(state, state.Owner(), Config{
+	handler, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true,
 		Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
 		Access:      &testAccess{allowed: true}, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
 	})

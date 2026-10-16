@@ -33,6 +33,10 @@ type TemporalClient interface {
 	ExecuteWorkflow(context.Context, client.StartWorkflowOptions, any, ...any) (client.WorkflowRun, error)
 }
 
+type workflowAuthorityStore interface {
+	AuthorizeWorkflowStart(context.Context, string) error
+}
+
 type Dispatcher struct {
 	store    WorkflowStartStore
 	temporal TemporalClient
@@ -62,6 +66,13 @@ func (d *Dispatcher) RunOnce(ctx context.Context) (int, error) {
 			continue
 		}
 		callCtx, cancel := context.WithTimeout(ctx, workflowStartCall)
+		if authority, ok := d.store.(workflowAuthorityStore); ok {
+			if err = authority.AuthorizeWorkflowStart(callCtx, intent.JobID); err != nil {
+				cancel()
+				failures = append(failures, err)
+				continue
+			}
+		}
 		run, startErr := d.temporal.ExecuteWorkflow(callCtx, client.StartWorkflowOptions{
 			ID: intent.WorkflowID, TaskQueue: TaskQueue,
 			WorkflowExecutionTimeout:                 15 * time.Minute,

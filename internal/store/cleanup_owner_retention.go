@@ -297,7 +297,7 @@ func (s *Store) expireDueJob(ctx context.Context, jobID string) error {
 	if err = deleteQueueReservation(ctx, tx, jobID); err != nil {
 		return err
 	}
-	if err = enqueueTerminal(ctx, tx, jobID, workspace, project, uint64(newVersion), terminalAt, "expired"); err != nil {
+	if err = s.enqueueTerminal(ctx, tx, jobID, workspace, project, uint64(newVersion), terminalAt, "expired"); err != nil {
 		return err
 	}
 	return commit(ctx, tx)

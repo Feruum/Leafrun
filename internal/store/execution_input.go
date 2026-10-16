@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
+	identityv1 "github.com/leafrun/leafrun-contracts/identity/v1"
 	"github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
@@ -15,6 +16,7 @@ import (
 // ExecutionInput is read from durable admission data, never from a workflow's
 // sole copy of a request. Parameters retain their original normalized bytes.
 type ExecutionInput struct {
+	Identity             *identityv1.Identity
 	InitiatorID          string
 	NormalizedRequest    []byte
 	Request              generationv1.CreateJobRequest
@@ -26,6 +28,11 @@ type ExecutionInput struct {
 
 func (s *Store) GetExecutionInput(ctx context.Context, jobID string) (ExecutionInput, error) {
 	var out ExecutionInput
+	authority, authorityErr := s.LoadAuthority(ctx, jobID)
+	if authorityErr != nil {
+		return out, authorityErr
+	}
+	out.Identity = authority.Identity
 	var fingerprint, selectionFingerprint, actorSubject, actorDomain string
 	var selectionRequest []byte
 	err := s.pool.QueryRow(ctx, `SELECT initiator_id,normalized_request,fingerprint,selection_request,COALESCE(selection_fingerprint,''),actor_subject,actor_domain FROM generation_jobs WHERE job_id=$1`, jobID).Scan(&out.InitiatorID, &out.NormalizedRequest, &fingerprint, &selectionRequest, &selectionFingerprint, &actorSubject, &actorDomain)

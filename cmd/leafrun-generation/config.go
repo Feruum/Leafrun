@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/Feruum/Leafrun/internal/orchestration"
 	"github.com/Feruum/Leafrun/internal/service"
+	identityv1 "github.com/leafrun/leafrun-contracts/identity/v1"
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 )
@@ -26,6 +28,24 @@ type apiEnvironment struct {
 func readAPIEnvironment(getenv func(string) string) (apiEnvironment, error) {
 	var config apiEnvironment
 	var err error
+	config.Runtime.AuthMode = getenv("GENERATION_AUTH_MODE")
+	config.Runtime.DevFixtures = getenv("GENERATION_DEV_FIXTURES") == "true"
+	config.Runtime.CookieName = getenv("GENERATION_SESSION_COOKIE")
+	config.Runtime.GuestCookieName = getenv("LEAFRUN_GUEST_COOKIE_NAME")
+	config.Runtime.LoopbackHTTP = getenv("GENERATION_LOOPBACK_HTTP") == "true"
+	if config.Runtime.AuthMode != "access" && config.Runtime.AuthMode != "dev" {
+		return config, errors.New("GENERATION_AUTH_MODE must be explicit access or dev")
+	}
+	if config.Runtime.AuthMode == "access" {
+		version, parseErr := strconv.ParseUint(getenv("GENERATION_AUDIT_CLEANUP_AUTHORITY_VERSION"), 10, 63)
+		config.Runtime.AuditCleanupAuthority = identityv1.AuthorityRef{Kind: identityv1.KindService, ID: getenv("GENERATION_AUDIT_CLEANUP_AUTHORITY_ID"), Version: version}
+		if parseErr != nil || config.Runtime.AuditCleanupAuthority.Validate() != nil {
+			return config, errors.New("explicit Generation audit cleanup authority required")
+		}
+		if err = jsonvalue.Unmarshal([]byte(getenv("GENERATION_BROWSER_ORIGINS_JSON")), &config.Runtime.BrowserOrigins, 32<<10); err != nil {
+			return config, errors.New("explicit browser origins are required")
+		}
+	}
 	config.Runtime.DatabaseURL, err = required(getenv, "GENERATION_DATABASE_URL")
 	if err != nil {
 		return config, err
@@ -67,13 +87,17 @@ func readAPIEnvironment(getenv func(string) string) (apiEnvironment, error) {
 	if config.Runtime.EngineVersion != "0.15.1" {
 		return config, errors.New("GENERATION_ENGINE_VERSION must be exactly 0.15.1")
 	}
-	credentialJSON, err := required(getenv, "GENERATION_CREDENTIALS_JSON")
-	if err != nil {
-		return config, err
-	}
-	config.Runtime.Credentials, err = parseCredentials(credentialJSON)
-	if err != nil {
-		return config, errors.New("GENERATION_CREDENTIALS_JSON is invalid")
+	if config.Runtime.AuthMode == "dev" {
+		credentialJSON, credentialErr := required(getenv, "GENERATION_CREDENTIALS_JSON")
+		if credentialErr != nil {
+			return config, credentialErr
+		}
+		config.Runtime.Credentials, err = parseCredentials(credentialJSON)
+		if err != nil {
+			return config, errors.New("GENERATION_CREDENTIALS_JSON is invalid")
+		}
+	} else if getenv("GENERATION_CREDENTIALS_JSON") != "" {
+		return config, errors.New("public fixture credentials are forbidden in Access mode")
 	}
 	if err = config.Runtime.ValidateCredentialSeparation(); err != nil {
 		return config, err

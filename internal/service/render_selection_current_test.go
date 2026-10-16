@@ -59,7 +59,7 @@ func TestRenderSelectionRechecksCurrentReleaseAfterResourcePreflight(t *testing.
 			projects := &selectionProjects{execution: resolved, current: projectsv1.CurrentReleaseDecision{Allowed: true}}
 			pins := &testPins{}
 			configureTestSnapshot(t, pins)
-			server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+			server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -152,7 +152,7 @@ func TestRenderSelectionCurrentReleaseAdmissionAndReplay(t *testing.T) {
 			}
 			pins := &testPins{}
 			configureTestSnapshot(t, pins)
-			server, err := New(state, state.Owner(), Config{Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
+			server, err := New(state, state.Owner(), Config{AuthMode: "dev", DevFixtures: true, Credentials: StaticTokens{"valid-token": principal}, Access: &testAccess{allowed: true}, Pins: pins, Resources: resources, Projects: projects, OwnerToken: "owner-secret", EngineVersion: "0.15.1"})
 			if err != nil {
 				t.Fatal(err)
 			}

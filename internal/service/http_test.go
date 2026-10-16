@@ -241,7 +241,7 @@ func (p *testPins) ActivatePin(_ context.Context, pinID string) (storagev1.Pin, 
 func newTestServer(t *testing.T, s *testStore, access *testAccess, pins *testPins) *Server {
 	t.Helper()
 	configureTestSnapshot(t, pins)
-	server, err := New(s, testOwner{}, Config{
+	server, err := New(s, testOwner{}, Config{AuthMode: "dev", DevFixtures: true,
 		Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
 		Access:      access, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
 		Ready: func(context.Context) error { return nil },
@@ -388,7 +388,7 @@ func TestPinExpiryUsesStorageClockInsteadOfAPISystemClock(t *testing.T) {
 			}
 			pins := &testPins{}
 			apiNow := time.Now().Add(2 * time.Hour)
-			server, err := New(state, testOwner{}, Config{
+			server, err := New(state, testOwner{}, Config{AuthMode: "dev", DevFixtures: true,
 				Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
 				Access:      &testAccess{allowed: true}, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
 				Now: func() time.Time { return apiNow },
@@ -455,7 +455,7 @@ func TestPinKnownActivationRejectionCannotBeOverriddenByActiveMetadata(t *testin
 					state.job.DerivedSnapshotID = objectID
 				}
 				pins := &activationResponsePins{testPins: &testPins{}, responseErr: tc.err}
-				server, err := New(state, testOwner{}, Config{
+				server, err := New(state, testOwner{}, Config{AuthMode: "dev", DevFixtures: true,
 					Credentials: StaticTokens{"valid-token": {Subject: "user-1", Domain: "core"}},
 					Access:      &testAccess{allowed: true}, Pins: pins, OwnerToken: "owner-secret", EngineVersion: "0.15.1",
 				})

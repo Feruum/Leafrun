@@ -5,6 +5,7 @@ import (
 	"time"
 
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
+	identityv1 "github.com/leafrun/leafrun-contracts/identity/v1"
 	projectsv1 "github.com/leafrun/leafrun-contracts/projects/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 )
@@ -24,6 +25,7 @@ const (
 // parameter bytes. The store validates that the request fingerprint is the
 // Contracts generation/v1 fingerprint before it persists either byte slice.
 type AdmitInput struct {
+	Identity             *identityv1.Identity
 	WorkspaceID          string
 	ProjectID            string
 	InitiatorID          string

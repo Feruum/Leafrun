@@ -90,7 +90,22 @@ func (s *Store) GetAttempt(ctx context.Context, jobID, attemptID string) (Attemp
 }
 
 func (s *Store) Ready(ctx context.Context) error {
-	rows, err := s.pool.Query(ctx, `SELECT j.job_id,j.deadline,j.normalized_request,a.recovery_claimed,w.state,o.sent_at FROM generation_jobs j LEFT JOIN generation_attempts a ON a.job_id=j.job_id LEFT JOIN generation_workflow_starts w ON w.job_id=j.job_id LEFT JOIN generation_terminal_outbox t ON t.job_id=j.job_id LEFT JOIN platform_event_outbox o ON o.event_id=t.event_id LIMIT 0`)
+	n, err := generationLedger(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	if n != len(generationMigrationFiles) {
+		return errors.New("Generation schema upgrade required")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT j.job_id,j.deadline,j.normalized_request,j.original_identity,j.authority_release_id,j.authority_descriptor_digest,a.recovery_claimed,w.state,o.sent_at FROM generation_jobs j LEFT JOIN generation_attempts a ON a.job_id=j.job_id LEFT JOIN generation_workflow_starts w ON w.job_id=j.job_id LEFT JOIN generation_terminal_outbox t ON t.job_id=j.job_id LEFT JOIN platform_event_outbox o ON o.event_id=t.event_id LIMIT 0`)
+	if err != nil {
+		return err
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	rows, err = s.pool.Query(ctx, `SELECT job_id,operation_id,canonical_scope,initiating_identity FROM generation_audit_context LIMIT 0`)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -11,6 +12,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     defaults:
       run:
         shell: pwsh
@@ -22,6 +24,9 @@ jobs:
         id: dependencies
         run: |
           $pins = Get-Content -Raw ci/dependencies.json | ConvertFrom-Json
+          foreach($name in @('core','contracts','platform','integrations')) {
+            if($pins.$name.ref -notmatch '^[0-9a-f]{40}$' -or $pins.$name.tree -notmatch '^[0-9a-f]{40}$' -or $pins.$name.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'){throw 'Invalid immutable dependency pin'}
+          }
           "json=$($pins | ConvertTo-Json -Depth 5 -Compress)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Check out Core
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,6 +62,15 @@ jobs:
           cache: false
       - name: Configure exact source workspace
         run: |
+          $pins=Get-Content ci/dependencies.json -Raw|ConvertFrom-Json
+          foreach($name in @('core','contracts','platform','integrations')) {
+            $commit=git -C ".deps/$name" rev-parse HEAD
+            if($LASTEXITCODE -ne 0){throw 'Cannot identify dependency commit'}
+            $tree=git -C ".deps/$name" rev-parse ($commit+'^{tree}')
+            if($LASTEXITCODE -ne 0){throw 'Cannot identify dependency tree'}
+            $dirty=git -C ".deps/$name" status --porcelain
+            if($LASTEXITCODE -ne 0 -or $dirty -or $commit -ne $pins.$name.ref -or $tree -ne $pins.$name.tree){throw 'Dependency ref/tree/cleanliness mismatch'}
+          }
           $lines = @('go 1.27.0','use (',' ".."')
           foreach ($name in @('core','contracts','platform','integrations')) { $lines += ' "../.deps/' + $name + '"' }
           $lines += ')'
@@ -70,10 +84,21 @@ jobs:
           "GOWORK=$work" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install verified Typst 0.15.1
         run: . ./.deps/core/scripts/install-typst.ps1
-      - run: go test ./... -count=1 -v
+      - run: go test ./... -count=1 -timeout=15m -v
       - run: go vet ./...
       - run: go build ./...
       - run: go run ./examples/render ./examples/invoice
+      - name: Core tests against final E06 dependencies
+        run: |
+          Push-Location .deps/core
+          try {
+            go test -count=1 -timeout=15m ./...
+            if($LASTEXITCODE -ne 0){throw 'Core tests failed'}
+            go vet ./...
+            if($LASTEXITCODE -ne 0){throw 'Core vet failed'}
+            go build ./...
+            if($LASTEXITCODE -ne 0){throw 'Core build failed'}
+          } finally {Pop-Location}
       - name: Race detector
         if: runner.os == 'Linux'
-        run: go test -race ./... -count=1
+        run: go test -race ./... -count=1 -timeout=15m

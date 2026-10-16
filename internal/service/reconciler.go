@@ -30,11 +30,15 @@ func NewReconciler(server *Server, interval time.Duration) (*Reconciler, error) 
 }
 
 func (r *Reconciler) RunOnce(ctx context.Context) error {
+	cleanupErr := r.server.recoverUnknownPins(ctx)
 	ids, err := r.server.store.PendingAdmissions(ctx, 100)
 	if err != nil {
 		return fmt.Errorf("list pending Generation admissions: %w", err)
 	}
 	var failures []error
+	if cleanupErr != nil {
+		failures = append(failures, cleanupErr)
+	}
 	for _, jobID := range ids {
 		job, getErr := r.server.store.GetJob(ctx, jobID)
 		if getErr == nil {

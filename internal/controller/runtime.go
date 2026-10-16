@@ -110,6 +110,10 @@ func (c *Controller) Execute(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
+	ctx, err = service.RestoreExecutionAuthority(ctx, input)
+	if err != nil {
+		return err
+	}
 	principal, err := service.DecodeInitiator(input.InitiatorID)
 	if err != nil {
 		return err
@@ -149,6 +153,13 @@ func (c *Controller) Execute(ctx context.Context, jobID string) error {
 	}
 	if err = c.engine.Ready(ctx); err != nil {
 		return err
+	}
+	allowed, err = c.publisher.checkAccess(ctx, job, input, "generation.execute")
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return c.state.FailJob(ctx, store.TerminalInput{JobID: jobID, Phase: "access", FailureCode: "access_denied"})
 	}
 	token, createKey, err := newAttemptIdentity()
 	if err != nil {
@@ -196,6 +207,13 @@ func (c *Controller) executeAttempt(ctx context.Context, cancel context.CancelFu
 		openInputFiles = openInputFileFactory(ctx)
 	}
 	stagePath := attempt.PrivateStagingPath
+	allowed, authErr := c.publisher.checkAccess(ctx, job, input, "generation.execute")
+	if authErr != nil {
+		return authErr
+	}
+	if !allowed {
+		return c.finishWithoutContainer(ctx, job, attempt, "access_denied", "access", store.ErrAuthorityDenied, true)
+	}
 	snapshot, err := c.storage.GetSnapshot(ctx, job.SourceSnapshotID)
 	if err != nil {
 		return c.finishWithoutContainer(ctx, job, attempt, "source_unavailable", "preparing", err, false)
@@ -203,6 +221,16 @@ func (c *Controller) executeAttempt(ctx context.Context, cancel context.CancelFu
 	remote, bundle, err := newRemoteSnapshotBundle(ctx, c.storage, snapshot, generationJobIdentity{SnapshotID: job.SourceSnapshotID, ContentID: job.SourceContentID, Scope: job.Scope})
 	if err != nil {
 		return c.finishWithoutContainer(ctx, job, attempt, "source_invalid", "preparing", err, true)
+	}
+	remote.beforeOpen = func() error {
+		allowed, checkErr := c.publisher.checkAccess(ctx, job, input, "generation.execute")
+		if checkErr != nil {
+			return checkErr
+		}
+		if !allowed {
+			return store.ErrAuthorityDenied
+		}
+		return nil
 	}
 	if err = c.state.RecordSourceIdentity(ctx, job.JobID, snapshot.Manifest.ID); err != nil {
 		return c.finishWithoutContainer(ctx, job, attempt, "source_unavailable", "preparing", err, false)
@@ -262,6 +290,20 @@ func (c *Controller) executeAttempt(ctx context.Context, cancel context.CancelFu
 		return errors.Join(err, c.stopAndFinalize(ctx, job, attempt, spec, containerID, falseWithCause(err)))
 	}
 
+	allowed, authErr = c.publisher.checkAccess(ctx, job, input, "generation.execute")
+	if authErr == nil && allowed {
+		authErr = c.state.CheckExecutionStart(ctx, job.JobID, attempt.AttemptID, attempt.FencingEpoch)
+	}
+	if authErr != nil || !allowed {
+		if authErr == nil {
+			authErr = store.ErrAuthorityDenied
+		}
+		cause := falseWithCause(authErr)
+		if errors.Is(authErr, store.ErrAuthorityDenied) {
+			cause = failureCause{err: authErr, phase: "access", code: "access_denied"}
+		}
+		return errors.Join(authErr, c.stopAndFinalize(ctx, job, attempt, spec, containerID, cause))
+	}
 	startErr := c.engine.Start(ctx, containerID)
 	if startErr != nil {
 		state, inspectErr := c.engine.Inspect(ctx, containerID, spec)

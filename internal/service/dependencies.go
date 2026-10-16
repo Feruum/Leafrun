@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	accessv1 "github.com/leafrun/leafrun-contracts/access/v1"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 
 	jsonvalue "github.com/leafrun/leafrun-contracts/jsonvalue/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
+	"github.com/leafrun/leafrun-platform/authn"
 )
 
 const dependencyResponseLimit = 1 << 20
@@ -44,6 +46,7 @@ func newDependencyHTTP(baseURL, token string, transport *http.Client) (*dependen
 		transport = &http.Client{Timeout: 10 * time.Second}
 	}
 	copy := *transport
+	copy.Jar = nil
 	if copy.Timeout <= 0 {
 		copy.Timeout = 10 * time.Second
 	}
@@ -117,7 +120,10 @@ func (d *dependencyHTTP) callBounded(ctx context.Context, method, path string, i
 
 // AccessClient makes strict, bounded owner/access checks. It carries one fixed
 // Generation service credential and never follows redirects.
-type AccessClient struct{ http *dependencyHTTP }
+type AccessClient struct {
+	http    *dependencyHTTP
+	current *authn.Client
+}
 
 func NewAccessClient(baseURL, fixedToken string, transport *http.Client) (*AccessClient, error) {
 	dependency, err := newDependencyHTTP(baseURL, fixedToken, transport)
@@ -128,6 +134,13 @@ func NewAccessClient(baseURL, fixedToken string, transport *http.Client) (*Acces
 }
 
 func (c *AccessClient) Check(ctx context.Context, check storagev1.AccessCheck) (bool, error) {
+	if c.current != nil {
+		allowed, err := c.current.CheckStorage(ctx, check)
+		if errors.Is(err, accessv1.ErrUnauthenticated) || errors.Is(err, accessv1.ErrDenied) {
+			return false, nil
+		}
+		return allowed, err
+	}
 	var decision storagev1.AccessDecision
 	if err := c.http.call(ctx, http.MethodPost, "/internal/v1/checks/access", check, &decision); err != nil {
 		return false, err
@@ -136,8 +149,7 @@ func (c *AccessClient) Check(ctx context.Context, check storagev1.AccessCheck) (
 }
 
 func (c *AccessClient) Ready(ctx context.Context) error {
-	_, err := c.Check(ctx, storagev1.AccessCheck{Principal: storagev1.Principal{Subject: "leafrun-generation", Domain: "service"}, Scope: storagev1.Scope{WorkspaceID: "__readiness__", ProjectID: "__readiness__"}, Operation: "health"})
-	return err
+	return c.http.call(ctx, http.MethodGet, "/readyz", nil, nil)
 }
 
 func (c *PinClient) Ready(ctx context.Context) error {

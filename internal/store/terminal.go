@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	auditv1 "github.com/leafrun/leafrun-contracts/audit/v1"
 	generationv1 "github.com/leafrun/leafrun-contracts/generation/v1"
 	storagev1 "github.com/leafrun/leafrun-contracts/storage/v1"
 	"github.com/leafrun/leafrun-platform/events"
@@ -85,7 +86,10 @@ func (s *Store) TerminalSuccess(ctx context.Context, in SuccessInput) error {
 	}
 	var terminalAt time.Time
 	var newVersion int64
-	err = tx.QueryRow(ctx, `UPDATE generation_jobs SET status='succeeded',phase='completed',artifact=$2::jsonb,artifact_id=$3,diagnostics=$4::jsonb,raw_diagnostics=$5,failure_code='',terminal_at=clock_timestamp(),updated_at=clock_timestamp(),version=version+1,publication_owner='',publication_lease_until=NULL WHERE job_id=$1 RETURNING terminal_at,version`, in.JobID, bindingJSON, binding.ArtifactID, diagnostics, in.RawDiagnostics).Scan(&terminalAt, &newVersion)
+	err = tx.QueryRow(ctx, `UPDATE generation_jobs SET status='succeeded',phase='completed',artifact=$2::jsonb,artifact_id=$3,diagnostics=$4::jsonb,raw_diagnostics=$5,failure_code='',terminal_at=clock_timestamp(),updated_at=clock_timestamp(),version=version+1 WHERE job_id=$1 AND deadline>clock_timestamp() AND publication_lease_until>clock_timestamp() AND EXISTS(SELECT 1 FROM generation_publication_candidates c WHERE c.candidate_id=$6 AND c.job_id=$1 AND c.expires_at>clock_timestamp()) AND EXISTS(SELECT 1 FROM generation_admission_receipts r WHERE r.job_id=$1 AND r.expires_at>clock_timestamp()) RETURNING terminal_at,version`, in.JobID, bindingJSON, binding.ArtifactID, diagnostics, in.RawDiagnostics, candidate.CandidateID).Scan(&terminalAt, &newVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	}
 	if err != nil {
 		return fmt.Errorf("commit generation success: %w", err)
 	}
@@ -95,7 +99,36 @@ func (s *Store) TerminalSuccess(ctx context.Context, in SuccessInput) error {
 	if err = deleteQueueReservation(ctx, tx, in.JobID); err != nil {
 		return err
 	}
-	if err = enqueueTerminal(ctx, tx, in.JobID, workspace, project, uint64(newVersion), terminalAt, generationv1.Succeeded); err != nil {
+	if err = s.enqueueTerminal(ctx, tx, in.JobID, workspace, project, uint64(newVersion), terminalAt, generationv1.Succeeded); err != nil {
+		return err
+	}
+	// Check after job/candidate/receipt locks and stored binding/fence checks.
+	// A lock wait cannot reuse an earlier allow decision.
+	if err = s.gateAuthority(ctx, tx, in.JobID, "generation.publish"); err != nil {
+		return err
+	}
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(publication_lease_until>clock_timestamp(),false),deadline>clock_timestamp() FROM generation_jobs WHERE job_id=$1`, in.JobID).Scan(&leaseOK, &deadlineOK); err != nil {
+		return err
+	}
+	if !leaseOK || !deadlineOK {
+		return ErrLeaseLost
+	}
+	if err = tx.QueryRow(ctx, `SELECT expires_at>clock_timestamp() FROM generation_publication_candidates WHERE candidate_id=$1`, candidate.CandidateID).Scan(&candidateValid); err != nil {
+		return err
+	}
+	if !candidateValid {
+		return ErrCandidateExpired
+	}
+	if err = tx.QueryRow(ctx, `SELECT expires_at>clock_timestamp() FROM generation_admission_receipts WHERE job_id=$1`, in.JobID).Scan(&receiptValid); err != nil {
+		return err
+	}
+	if !receiptValid {
+		return ErrReceiptExpired
+	}
+	var cleared bool
+	if err = tx.QueryRow(ctx, `UPDATE generation_jobs SET publication_owner='',publication_lease_until=NULL WHERE job_id=$1 AND deadline>clock_timestamp() AND publication_lease_until>clock_timestamp() AND EXISTS(SELECT 1 FROM generation_publication_candidates c WHERE c.candidate_id=$2 AND c.job_id=$1 AND c.expires_at>clock_timestamp()) AND EXISTS(SELECT 1 FROM generation_admission_receipts r WHERE r.job_id=$1 AND r.expires_at>clock_timestamp()) RETURNING true`, in.JobID, candidate.CandidateID).Scan(&cleared); errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	} else if err != nil {
 		return err
 	}
 	return commit(ctx, tx)
@@ -188,7 +221,7 @@ func (s *Store) terminalFailure(ctx context.Context, in TerminalInput, status ge
 	if err = deleteQueueReservation(ctx, tx, in.JobID); err != nil {
 		return err
 	}
-	if err = enqueueTerminal(ctx, tx, in.JobID, workspace, project, uint64(newVersion), terminalAt, status); err != nil {
+	if err = s.enqueueTerminal(ctx, tx, in.JobID, workspace, project, uint64(newVersion), terminalAt, status); err != nil {
 		return err
 	}
 	return commit(ctx, tx)
@@ -203,6 +236,12 @@ func (s *Store) RequestCancel(ctx context.Context, jobID string) (bool, error) {
 		return false, err
 	}
 	defer rollback(ctx, tx)
+	commitCurrent := func() error {
+		if err := s.gateCurrentOperation(ctx, tx, jobID, "generation.cancel"); err != nil {
+			return err
+		}
+		return commit(ctx, tx)
+	}
 	var workspace, project, status string
 	var version int64
 	err = tx.QueryRow(ctx, `SELECT workspace_id,project_id,status,version FROM generation_jobs WHERE job_id=$1 FOR UPDATE`, jobID).Scan(&workspace, &project, &status, &version)
@@ -213,13 +252,13 @@ func (s *Store) RequestCancel(ctx context.Context, jobID string) (bool, error) {
 		return false, err
 	}
 	if status == "succeeded" || status == "failed" || status == "canceled" || status == "expired" {
-		if err = commit(ctx, tx); err != nil {
+		if err = commitCurrent(); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
 	if status == "cancelling" {
-		if err = commit(ctx, tx); err != nil {
+		if err = commitCurrent(); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -235,7 +274,7 @@ func (s *Store) RequestCancel(ctx context.Context, jobID string) (bool, error) {
 		if err = deleteQueueReservation(ctx, tx, jobID); err != nil {
 			return false, err
 		}
-		if err = commit(ctx, tx); err != nil {
+		if err = commitCurrent(); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -243,7 +282,7 @@ func (s *Store) RequestCancel(ctx context.Context, jobID string) (bool, error) {
 	if err = finalizeCancelTx(ctx, tx, s, jobID, workspace, project); err != nil {
 		return false, err
 	}
-	if err = commit(ctx, tx); err != nil {
+	if err = commitCurrent(); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -265,7 +304,7 @@ func finalizeCancelTx(ctx context.Context, tx pgx.Tx, s *Store, jobID, workspace
 	if err = deleteQueueReservation(ctx, tx, jobID); err != nil {
 		return err
 	}
-	return enqueueTerminal(ctx, tx, jobID, workspace, project, uint64(version), terminalAt, generationv1.Canceled)
+	return s.enqueueTerminal(ctx, tx, jobID, workspace, project, uint64(version), terminalAt, generationv1.Canceled)
 }
 
 func deleteQueueReservation(ctx context.Context, tx pgx.Tx, jobID string) error {
@@ -344,7 +383,7 @@ func enqueuePinRelease(ctx context.Context, tx pgx.Tx, jobID string, pin storage
 	return err
 }
 
-func enqueueTerminal(ctx context.Context, tx pgx.Tx, jobID, workspace, project string, version uint64, at time.Time, status generationv1.Status) error {
+func (s *Store) enqueueTerminal(ctx context.Context, tx pgx.Tx, jobID, workspace, project string, version uint64, at time.Time, status generationv1.Status) error {
 	eventID := fmt.Sprintf("generation:%s:v%d", jobID, version)
 	e, subject, err := events.NewGenerationCompleted(events.GenerationCompletedInput{EventID: eventID, Producer: "leafrun-generation", JobID: jobID, WorkspaceID: workspace, ProjectID: project, AggregateVersion: version, OccurredAt: at})
 	if err != nil {
@@ -357,5 +396,8 @@ func enqueueTerminal(ctx context.Context, tx pgx.Tx, jobID, workspace, project s
 		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO generation_terminal_outbox(job_id,event_id) VALUES($1,$2) ON CONFLICT(job_id,event_id) DO NOTHING`, jobID, eventID)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.enqueueJobAudit(ctx, tx, jobID, version, at, auditv1.ActionGenerationTerminal, terminalAuditOutcome(status))
 }

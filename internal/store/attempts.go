@@ -96,6 +96,16 @@ func (s *Store) ClaimExecution(ctx context.Context, in ClaimAttemptInput) (Attem
 	if _, err = tx.Exec(ctx, `UPDATE generation_reservations SET reservation_type='execution',created_at=clock_timestamp() WHERE job_id=$1`, in.JobID); err != nil {
 		return Attempt{}, err
 	}
+	if err = s.gateAuthority(ctx, tx, in.JobID, "generation.execute"); err != nil {
+		return out, err
+	}
+	var active bool
+	if err = tx.QueryRow(ctx, `SELECT owner_lease_until>clock_timestamp() FROM generation_attempts WHERE attempt_id=$1`, out.AttemptID).Scan(&active); err != nil {
+		return Attempt{}, err
+	}
+	if !active {
+		return Attempt{}, ErrLeaseLost
+	}
 	if err = commit(ctx, tx); err != nil {
 		return Attempt{}, err
 	}
@@ -156,6 +166,37 @@ func (s *Store) TakeOverExpiredAttempt(ctx context.Context, jobID string) (Attem
 		return Attempt{}, err
 	}
 	return out, nil
+}
+
+// CheckExecutionStart repeats the configured saved-purpose authority gate after
+// slow container creation/attachment. It uses the locked job's original binding
+// and rechecks current attempt/time fences after the remote authority wait.
+func (s *Store) CheckExecutionStart(ctx context.Context, jobID, attemptID string, epoch int64) error {
+	if jobID == "" || attemptID == "" || epoch <= 0 {
+		return ErrLeaseLost
+	}
+	tx, err := begin(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+	var lockedJob string
+	if err = tx.QueryRow(ctx, `SELECT job_id FROM generation_jobs WHERE job_id=$1 FOR UPDATE`, jobID).Scan(&lockedJob); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	owner := IntentInput{JobID: lockedJob, RenderAttemptID: attemptID, AttemptEpoch: epoch, Kind: IntentContainerStart}
+	if err = checkIntentOwner(ctx, tx, owner); err != nil {
+		return err
+	}
+	if err = s.gateAuthority(ctx, tx, lockedJob, "generation.execute"); err != nil {
+		return err
+	}
+	if err = checkIntentOwner(ctx, tx, owner); err != nil {
+		return err
+	}
+	return commit(ctx, tx)
 }
 
 // MarkRendering advances a current leased attempt after the workflow has

@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestRelayConfigurationKeepsCredentialOutOfAddress(t *testing.T) {
-	values := map[string]string{"GENERATION_DATABASE_URL": "postgres://generation:private@localhost/generation", "GENERATION_NATS_ADDRESS": "nats://localhost:4222", "GENERATION_NATS_USER": "generation", "GENERATION_NATS_PASSWORD": "private"}
+	values := map[string]string{"GENERATION_AUTH_MODE": "dev", "GENERATION_DEV_FIXTURES": "true", "GENERATION_DATABASE_URL": "postgres://generation:private@localhost/generation", "GENERATION_NATS_ADDRESS": "nats://localhost:4222", "GENERATION_NATS_USER": "generation", "GENERATION_NATS_PASSWORD": "private"}
 	get := func(k string) string { return values[k] }
 	if _, err := readRelayEnvironment(get); err != nil {
 		t.Fatal(err)
